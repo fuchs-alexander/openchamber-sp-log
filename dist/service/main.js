@@ -75,11 +75,85 @@ var GUEST_SESSION_EVENT_TYPES = [
   "session-archived",
   "session-deleted"
 ];
+var SESSION_EVENTS_PATH = "/session-events";
+var SESSION_EVENTS_WIRE_VERSION = 1;
 var SESSION_EVENTS_IDLE_MS = 10 * 60000;
 var EVENT_TYPES = new Set(GUEST_SESSION_EVENT_TYPES);
+var isGuestSessionEventType = (value) => EVENT_TYPES.has(value);
+var readSessionEventRequest = (body) => {
+  let wire;
+  try {
+    const parsed = JSON.parse(body);
+    if (Object(parsed) !== parsed || parsed === null)
+      return null;
+    wire = parsed;
+  } catch {
+    return null;
+  }
+  const { v, requestId, event, content } = wire;
+  if (v !== SESSION_EVENTS_WIRE_VERSION)
+    return null;
+  if (String(requestId) !== requestId || requestId.length === 0)
+    return null;
+  if (Object(event) !== event || event === undefined)
+    return null;
+  const { id, type, at, session, project, linked, permission, question } = event;
+  if (String(id) !== id || id.length === 0)
+    return null;
+  if (String(type) !== type || !isGuestSessionEventType(type))
+    return null;
+  if (!Number.isFinite(at))
+    return null;
+  if (Object(session) !== session || session === undefined)
+    return null;
+  const sessionId = session.id;
+  if (String(sessionId) !== sessionId || sessionId.length === 0)
+    return null;
+  const parentId = session.parentId;
+  if (parentId !== null && (String(parentId) !== parentId || parentId.length === 0))
+    return null;
+  if (Object(project) !== project || project === undefined)
+    return null;
+  const directory = project.directory;
+  if (directory !== null && (String(directory) !== directory || directory.length === 0))
+    return null;
+  if (!Array.isArray(linked))
+    return null;
+  const request = {
+    v: SESSION_EVENTS_WIRE_VERSION,
+    requestId,
+    event: { id, type, at: Number(at), session: { id: sessionId, parentId }, project: { directory }, linked }
+  };
+  if (permission !== undefined) {
+    if (Object(permission) !== permission)
+      return null;
+    const permissionRequestId = permission.requestId;
+    if (String(permissionRequestId) !== permissionRequestId || permissionRequestId.length === 0)
+      return null;
+    request.event.permission = { requestId: permissionRequestId };
+  }
+  if (question !== undefined) {
+    if (Object(question) !== question)
+      return null;
+    const { kind, id: questionId } = question;
+    if (kind !== "form" && kind !== "page")
+      return null;
+    if (String(questionId) !== questionId || questionId.length === 0)
+      return null;
+    request.event.question = { kind, id: questionId };
+  }
+  if (content !== undefined) {
+    if (Object(content) !== content || content.type !== type)
+      return null;
+    request.content = content;
+  }
+  return request;
+};
 // node_modules/@openchamber/sdk/dist/service-host.js
 var SERVICE_HOST_PATH = "/service/call";
 var OPENCHAMBER_HOST_CALLBACK_URL_ENV = "OPENCHAMBER_HOST_CALLBACK_URL";
+var SERVICE_MARKS_MAX = 200;
+var SERVICE_MARK_RATE_MAX = 60;
 var SERVICE_HOST_TIMEOUT_MS = 30000;
 var SERVICE_SCHEDULE_IDLE_MS = 10 * 60000;
 var MENTIONS_IDLE_MS = 10 * 60000;
@@ -205,6 +279,7 @@ var BROWSER_CONTROL_ACTIONS = [
 var BROWSER_PROVIDER_IDLE_MS = 10 * 60000;
 var CONTROL_ACTIONS = new Set(BROWSER_CONTROL_ACTIONS);
 var SOURCE_CONTROL_PROVIDER_IDLE_MS = 10 * 60000;
+var OPENCHAMBER_SERVICE_DATA_DIR = "OPENCHAMBER_SERVICE_DATA_DIR";
 var NOTIFICATIONS_PROVIDER_IDLE_MS = 10 * 60000;
 var TRACKER_PROVIDER_IDLE_MS = 10 * 60000;
 var QUOTA_PROVIDER_IDLE_MS = 10 * 60000;
@@ -283,6 +358,162 @@ function createDrafts(deps) {
   };
 }
 
+// src/service/marks.ts
+import { readFile, rename, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+var MARK_RATE_MAX = SERVICE_MARK_RATE_MAX;
+var RATE_WINDOW_MS = 60000;
+var pad = (n) => String(n).padStart(2, "0");
+var formatHours = (hours) => String(Math.round(hours * 100) / 100).replace(".", ",");
+function markFor(s) {
+  if (s.loggedAt === null) {
+    return s.lastTurnAt === null ? null : { icon: "time-line", tone: "neutral", text: "SP: noch nicht geloggt" };
+  }
+  if (s.lastTurnAt !== null && s.lastTurnAt > s.loggedAt) {
+    const d = new Date(s.loggedAt);
+    return { icon: "time-line", tone: "warning", text: `SP: neue Arbeit seit Log am ${pad(d.getDate())}.${pad(d.getMonth() + 1)}.` };
+  }
+  return {
+    icon: "checkbox-circle-line",
+    tone: "success",
+    text: `SP: ${s.logs} ${s.logs === 1 ? "Log" : "Logs"} · ≈ ${formatHours(s.hours)} h`
+  };
+}
+var empty = () => ({ loggedAt: null, logs: 0, hours: 0, lastTurnAt: null, pendingLogId: null });
+var activity = (s) => Math.max(s.loggedAt ?? 0, s.lastTurnAt ?? 0);
+function isMarkState(value) {
+  if (!value || typeof value !== "object")
+    return false;
+  const s = value;
+  const numOrNull = (v) => v === null || typeof v === "number" && Number.isFinite(v);
+  return numOrNull(s.loggedAt) && numOrNull(s.lastTurnAt) && typeof s.logs === "number" && typeof s.hours === "number" && (s.pendingLogId === null || typeof s.pendingLogId === "string");
+}
+function fileStateStore(dir) {
+  const file = join(dir, "state.json");
+  return {
+    async load() {
+      try {
+        const raw = JSON.parse(await readFile(file, "utf8"));
+        if (!raw || typeof raw !== "object")
+          return {};
+        const out = {};
+        for (const [id, s] of Object.entries(raw))
+          if (isMarkState(s))
+            out[id] = s;
+        return out;
+      } catch {
+        return {};
+      }
+    },
+    async save(state) {
+      const tmp = `${file}.${process.pid}.tmp`;
+      await writeFile(tmp, JSON.stringify(state));
+      await rename(tmp, file);
+    }
+  };
+}
+function createMarkBook(deps) {
+  const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  let states = {};
+  const shown = new Map;
+  const queue = new Set;
+  const sentAt = [];
+  let draining = Promise.resolve();
+  let saving = Promise.resolve();
+  async function waitForRate() {
+    for (;; ) {
+      const now = deps.now();
+      while (sentAt.length && sentAt[0] <= now - RATE_WINDOW_MS)
+        sentAt.shift();
+      if (sentAt.length < MARK_RATE_MAX)
+        return;
+      await sleep(sentAt[0] + RATE_WINDOW_MS - now);
+    }
+  }
+  async function drain() {
+    for (const id of queue) {
+      queue.delete(id);
+      const s = states[id];
+      const mark = s ? markFor(s) : null;
+      const key = JSON.stringify(mark);
+      if ((shown.get(id) ?? "null") === key)
+        continue;
+      await waitForRate();
+      sentAt.push(deps.now());
+      try {
+        await deps.setMark({ sessionId: id }, mark);
+        if (mark)
+          shown.set(id, key);
+        else
+          shown.delete(id);
+      } catch {}
+    }
+  }
+  function apply(id) {
+    const wasIdle = queue.size === 0;
+    queue.add(id);
+    if (wasIdle)
+      draining = draining.then(drain);
+  }
+  function persist() {
+    const snapshot = structuredClone(states);
+    saving = saving.then(() => deps.store.save(snapshot)).catch(() => {});
+  }
+  function prune() {
+    const ids = Object.keys(states);
+    if (ids.length <= SERVICE_MARKS_MAX)
+      return;
+    ids.sort((a, b) => activity(states[b]) - activity(states[a]));
+    for (const id of ids.slice(SERVICE_MARKS_MAX)) {
+      delete states[id];
+      apply(id);
+    }
+  }
+  function update(id, change) {
+    const s = states[id] ?? empty();
+    change(s);
+    states[id] = s;
+    prune();
+    persist();
+    apply(id);
+  }
+  return {
+    async start() {
+      states = await deps.store.load();
+      for (const id of Object.keys(states))
+        apply(id);
+    },
+    turnFinished(id) {
+      update(id, (s) => {
+        if (s.pendingLogId !== null)
+          s.pendingLogId = null;
+        else
+          s.lastTurnAt = deps.now();
+      });
+    },
+    pending(id, logId) {
+      update(id, (s) => {
+        s.pendingLogId = logId;
+      });
+    },
+    logged(id, at, hours) {
+      update(id, (s) => {
+        s.loggedAt = Math.max(at, s.lastTurnAt ?? at);
+        s.logs += 1;
+        s.hours += hours;
+        s.pendingLogId = null;
+      });
+    },
+    state(id) {
+      return states[id] ? { ...states[id] } : null;
+    },
+    async flush() {
+      await draining;
+      await saving;
+    }
+  };
+}
+
 // src/service/main.ts
 var ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 var PROMPT_MAX = 8000;
@@ -295,6 +526,14 @@ function authorized(header, token) {
   return given.length === expected.length && timingSafeEqual(given, expected);
 }
 var validId = (value) => typeof value === "string" && ID_PATTERN.test(value);
+async function readJson(req) {
+  try {
+    const body = await req.json();
+    return body && typeof body === "object" ? body : null;
+  } catch {
+    return null;
+  }
+}
 function createHandler(deps) {
   return async (req) => {
     if (!deps.token || !authorized(req.headers.get("authorization"), deps.token)) {
@@ -319,7 +558,33 @@ function createHandler(deps) {
           return json(400, { error: "BAD_PROMPT" });
         }
         await deps.drafts.start({ sessionId, logId, prompt });
+        deps.marks.pending(sessionId, logId);
         return json(200, { started: true });
+      }
+      if (url.pathname === "/logged" && req.method === "POST") {
+        const body = await readJson(req);
+        if (!body)
+          return json(400, { error: "BAD_JSON" });
+        const { sessionId, at, hours } = body;
+        if (!validId(sessionId))
+          return json(400, { error: "BAD_ID" });
+        if (typeof at !== "number" || !Number.isFinite(at) || at <= 0)
+          return json(400, { error: "BAD_AT" });
+        if (typeof hours !== "number" || !Number.isFinite(hours) || hours < 0 || hours > 24) {
+          return json(400, { error: "BAD_HOURS" });
+        }
+        deps.marks.logged(sessionId, at, hours);
+        deps.emit("logged", { sessionId }).catch(() => {});
+        return json(200, { ok: true });
+      }
+      if (url.pathname === SESSION_EVENTS_PATH && req.method === "POST") {
+        const request = readSessionEventRequest(await req.text());
+        if (!request)
+          return json(400, { ok: false, error: "not a session event" });
+        const { type, session } = request.event;
+        if (type === "turn-finished" && session.parentId === null)
+          deps.marks.turnFinished(session.id);
+        return json(200, { ok: true });
       }
       if (url.pathname === "/draft" && req.method === "GET") {
         const sessionId = url.searchParams.get("sessionId");
@@ -350,7 +615,14 @@ function serve(port, token) {
     },
     now: () => Date.now()
   });
-  const handler = createHandler({ token, drafts });
+  const dataDir = process.env[OPENCHAMBER_SERVICE_DATA_DIR] ?? ".";
+  const marks = createMarkBook({
+    store: fileStateStore(dataDir),
+    setMark: (target, mark) => host.setMark(target, mark),
+    now: () => Date.now()
+  });
+  marks.start();
+  const handler = createHandler({ token, drafts, marks, emit: (topic, data) => host.emit(topic, data) });
   const server = createServer(async (incoming, outgoing) => {
     try {
       const chunks = [];

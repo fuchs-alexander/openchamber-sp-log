@@ -368,7 +368,7 @@ describe("flow: session draft", () => {
       generate: [JSON.stringify({ taskId: null, reason: "" })],
       ids: ["log-1", "log-2", "log-3", "log-4"],
     });
-    const posts = () => calls.service.filter((r) => r.method === "POST");
+    const posts = () => calls.service.filter((r) => r.method === "POST" && r.path === "/draft");
 
     // log 1: no binding, whole session
     await flow.start({ ...item, messages: more(4) });
@@ -549,6 +549,26 @@ describe("flow", () => {
     expect(calls.toast).toEqual([{ kind: "success", message: "In Super Productivity geloggt" }]);
     expect(calls.close).toBe(1);
     expect(flow.state.phase).toBe("done");
+  });
+
+  test("flow: reports a saved log to the service", async () => {
+    const { flow, calls, item } = setup();
+    await flow.start(item);
+    await flow.save();
+    const logged = calls.service.filter((r) => r.path === "/logged");
+    expect(logged).toHaveLength(1);
+    expect(logged[0]!.method).toBe("POST");
+    expect(JSON.parse(logged[0]!.body!)).toEqual({ sessionId: "s1", at: new Date(2026, 10, 17, 12).getTime(), hours: 2.5 });
+    // NO_SERVICE is not fatal
+    expect(calls.toast).toEqual([{ kind: "success", message: "In Super Productivity geloggt" }]);
+    expect(flow.state.phase).toBe("done");
+  });
+
+  test("flow: no service report when the save fails", async () => {
+    const { flow, calls, item } = setup({ create: () => new Error("boom") });
+    await flow.start(item);
+    await flow.save();
+    expect(calls.service.filter((r) => r.path === "/logged")).toHaveLength(0);
   });
 
   test("flow: append uses edited draft", async () => {

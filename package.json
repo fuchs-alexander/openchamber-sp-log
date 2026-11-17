@@ -1,6 +1,6 @@
 {
   "name": "openchamber-sp-log",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,7 +16,7 @@
   },
   "openchamber": {
     "apiVersion": 1,
-    "engines": { "openchamber": ">=2.7.0" },
+    "engines": { "openchamber": ">=2.7.1" },
     "id": "sp-log",
     "name": "SP Log",
     "icon": "time-line",
@@ -25,7 +25,9 @@
       "statusSection": { "entry": "dist/status/index.html", "title": "SP Log", "height": 120 },
       "attach": "dialog",
       "capabilities": ["model"],
-      "service": { "entry": "dist/service/main.js", "runtime": "host" },
+      "service": { "entry": "dist/service/main.js", "runtime": "host", "keepRunning": true },
+      "marks": true,
+      "sessionEvents": { "events": ["turn-finished"] },
       "sessionControl": { "content": true },
       "actions": [
         { "id": "log-session", "label": "Nach Super Productivity loggen", "where": "session", "payload": ["messages"], "mode": "open" }

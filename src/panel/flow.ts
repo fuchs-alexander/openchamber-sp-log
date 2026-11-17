@@ -346,6 +346,14 @@ export function createFlow(deps: {
       () => true,
       () => false,
     );
+    // Lets the service mark the session as logged; without a service there is no mark.
+    await host
+      .serviceRequest({
+        method: "POST",
+        path: "/logged",
+        body: JSON.stringify({ sessionId: current.sessionId, at: date.getTime(), hours }),
+      })
+      .catch(() => {});
     const toast = bound
       ? ({ kind: "success", message: TEXT.logged } as const)
       : ({ kind: "error", message: TEXT.bindingFailed } as const);

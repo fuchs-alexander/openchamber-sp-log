@@ -45,6 +45,11 @@ host.onReady((ctx) => {
   setSession(ctx.session?.id ?? null);
 });
 host.onSession((session) => setSession(session?.id ?? null));
+// The service tells open frames when the dialog saved a log for a session.
+host.onServiceEvent(({ topic, data }) => {
+  if (topic !== "logged" || !sessionId) return;
+  if (data && typeof data === "object" && !Array.isArray(data) && data.sessionId === sessionId) void refresh();
+});
 // The binding changes in the log dialog; read it again when the section is shown again.
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") void refresh();

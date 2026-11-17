@@ -2,6 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { ServiceHostError } from "@openchamber/sdk";
 import { createDrafts, DRAFT_TTL_MS, HostTimeoutError, SessionWaitingError } from "../src/service/drafts.ts";
 import { createHandler } from "../src/service/main.ts";
+import { createMarkBook } from "../src/service/marks.ts";
+
+const noMarks = () =>
+  createMarkBook({
+    store: { load: async () => ({}), save: async () => {} },
+    setMark: async () => ({ saved: true }),
+    now: () => 0,
+  });
+const quiet = { marks: noMarks(), emit: async () => {} };
 
 type FakeSession = { status: string; reply: string | null };
 
@@ -127,7 +136,7 @@ describe("service http", () => {
 
   function http() {
     const fake = setup({ status: "busy", reply: null });
-    const handler = createHandler({ token: TOKEN, drafts: fake.drafts });
+    const handler = createHandler({ token: TOKEN, drafts: fake.drafts, ...quiet });
     return { ...fake, handler };
   }
 
@@ -170,7 +179,7 @@ describe("service http", () => {
 
   test("service: waiting session answers 409", async () => {
     const fake = setup({ status: "waiting", reply: null });
-    const handler = createHandler({ token: TOKEN, drafts: fake.drafts });
+    const handler = createHandler({ token: TOKEN, drafts: fake.drafts, ...quiet });
     const res = await handler(req("/draft", { method: "POST", body: JSON.stringify({ sessionId: "S1", logId: "L1", prompt: "p" }) }));
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ error: "session-waiting" });
@@ -189,7 +198,7 @@ describe("service http", () => {
       now: () => 0,
       hostTimeoutMs: 5,
     });
-    const handler = createHandler({ token: TOKEN, drafts });
+    const handler = createHandler({ token: TOKEN, drafts, ...quiet });
     const ok = await handler(req("/draft", { method: "POST", body: JSON.stringify({ sessionId: "S1", logId: "L1", prompt: "p" }) }));
     expect(ok.status).toBe(200);
     hang = true;
@@ -215,7 +224,7 @@ describe("service http", () => {
       },
       now: () => 0,
     });
-    const handler = createHandler({ token: TOKEN, drafts });
+    const handler = createHandler({ token: TOKEN, drafts, ...quiet });
     const res = await handler(req("/draft", { method: "POST", body: JSON.stringify({ sessionId: "S1", logId: "L1", prompt: "p" }) }));
     expect(res.status).toBe(502);
     expect(await res.json()).toEqual({ error: "FORBIDDEN" });

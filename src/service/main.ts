@@ -1,11 +1,20 @@
 /**
  * Local service: lets the panel ask the logged session for its own work-log
- * draft. Listens on 127.0.0.1 only; every request needs the host's bearer.
+ * draft, and marks sessions in the sidebar by their log state. Listens on
+ * 127.0.0.1 only; every request needs the host's bearer.
  */
 import { createServer } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { createServiceHost, ServiceHostError } from "@openchamber/sdk";
+import {
+  createServiceHost,
+  OPENCHAMBER_SERVICE_DATA_DIR,
+  readSessionEventRequest,
+  ServiceHostError,
+  SESSION_EVENTS_PATH,
+  type JsonValue,
+} from "@openchamber/sdk";
 import { createDrafts, HostTimeoutError, SessionWaitingError, type Drafts } from "./drafts.ts";
+import { createMarkBook, fileStateStore, type MarkBook } from "./marks.ts";
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 export const PROMPT_MAX = 8000;
@@ -22,7 +31,22 @@ function authorized(header: string | null, token: string): boolean {
 
 const validId = (value: unknown): value is string => typeof value === "string" && ID_PATTERN.test(value);
 
-export function createHandler(deps: { token: string; drafts: Drafts }): (req: Request) => Promise<Response> {
+async function readJson(req: Request): Promise<Record<string, unknown> | null> {
+  try {
+    const body = (await req.json()) as unknown;
+    return body && typeof body === "object" ? (body as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function createHandler(deps: {
+  token: string;
+  drafts: Drafts;
+  marks: MarkBook;
+  /** Tells the extension's open frames; failures are ignored. */
+  emit: (topic: string, data: JsonValue) => Promise<unknown>;
+}): (req: Request) => Promise<Response> {
   return async (req) => {
     if (!deps.token || !authorized(req.headers.get("authorization"), deps.token)) {
       return json(401, { error: "UNAUTHORIZED" });
@@ -45,7 +69,29 @@ export function createHandler(deps: { token: string; drafts: Drafts }): (req: Re
           return json(400, { error: "BAD_PROMPT" });
         }
         await deps.drafts.start({ sessionId, logId, prompt });
+        deps.marks.pending(sessionId, logId);
         return json(200, { started: true });
+      }
+      if (url.pathname === "/logged" && req.method === "POST") {
+        const body = await readJson(req);
+        if (!body) return json(400, { error: "BAD_JSON" });
+        const { sessionId, at, hours } = body;
+        if (!validId(sessionId)) return json(400, { error: "BAD_ID" });
+        if (typeof at !== "number" || !Number.isFinite(at) || at <= 0) return json(400, { error: "BAD_AT" });
+        if (typeof hours !== "number" || !Number.isFinite(hours) || hours < 0 || hours > 24) {
+          return json(400, { error: "BAD_HOURS" });
+        }
+        deps.marks.logged(sessionId, at, hours);
+        void deps.emit("logged", { sessionId }).catch(() => {});
+        return json(200, { ok: true });
+      }
+      if (url.pathname === SESSION_EVENTS_PATH && req.method === "POST") {
+        const request = readSessionEventRequest(await req.text());
+        if (!request) return json(400, { ok: false, error: "not a session event" });
+        const { type, session } = request.event;
+        // Subagents' turns belong to their parent's turn.
+        if (type === "turn-finished" && session.parentId === null) deps.marks.turnFinished(session.id);
+        return json(200, { ok: true });
       }
       if (url.pathname === "/draft" && req.method === "GET") {
         const sessionId = url.searchParams.get("sessionId");
@@ -73,7 +119,14 @@ function serve(port: number, token: string): void {
     },
     now: () => Date.now(),
   });
-  const handler = createHandler({ token, drafts });
+  const dataDir = process.env[OPENCHAMBER_SERVICE_DATA_DIR] ?? ".";
+  const marks = createMarkBook({
+    store: fileStateStore(dataDir),
+    setMark: (target, mark) => host.setMark(target, mark),
+    now: () => Date.now(),
+  });
+  void marks.start();
+  const handler = createHandler({ token, drafts, marks, emit: (topic, data) => host.emit(topic, data) });
 
   const server = createServer(async (incoming, outgoing) => {
     try {
