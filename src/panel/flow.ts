@@ -370,7 +370,7 @@ export function createFlow(deps: {
     let taskId: string;
     let timeBooked: boolean | null;
     try {
-      const saved = target === "new" ? await api.create(projectId, title, block, hours) : await api.append(target, block, hours);
+      const saved = target === "new" ? await api.create(projectId, title, block, hours, title) : await api.append(target, block, hours, title);
       taskId = saved.id;
       timeBooked = saved.timeBooked;
       // Logged: no frame may continue the request any more.

@@ -270,67 +270,150 @@ describe("gateway", () => {
 
   describe("time booking", () => {
     const TODAY = new Date(2026, 10, 17, 23, 30);
-    function gwt(routes: Record<string, Route>) {
-      const sp = spFake(routes);
+    const H = 3_600_000;
+    function gwt(model: SpModel) {
       const handle = createGateway({
         spUrl: SP_URL,
         spToken: () => SP_TOKEN,
         gatewayToken: GW_TOKEN,
-        fetch: sp.fetch,
+        fetch: model.fetch,
         now: () => TODAY,
       });
-      return { sp, handle };
+      return { sp: model, handle };
     }
-    const createOk = { "POST /tasks": () => json({ ok: true, data: { id: "NEW1" } }) };
-    const appendOk = {
-      "GET /tasks/T": () => json({ ok: true, data: { id: "T", notes: "alt", isDone: false } }),
-      "PATCH /tasks/T": () => json({ ok: true, data: { id: "T" } }),
-    };
+    const seq = (m: SpModel) => m.calls.map((c) => `${c.method} ${c.path}`);
 
-    test("create with hours books time on the local day", async () => {
-      const { sp, handle } = gwt({ ...createOk, "POST /tasks/NEW1/time": () => json({ ok: true, data: { id: "NEW1" } }) });
-      const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "n", hours: 2.5 }));
+    test("create with hours: parent, done subtask with the log, time on the subtask", async () => {
+      const { sp, handle } = gwt(spModel());
+      const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Login", notes: "block", hours: 2.5, logTitle: "Login gefixt" }));
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ id: "NEW1", timeBooked: true });
-      expect(sp.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["POST /tasks", "POST /tasks/NEW1/time"]);
-      expect(sp.calls[0]!.body).toEqual({ title: "Log", notes: "n", projectId: "A" });
-      expect(sp.calls[1]!.body).toEqual({ date: "2026-11-17", duration: 9_000_000 });
-      expect(sp.calls[1]!.auth).toBe(`Bearer ${SP_TOKEN}`);
+      expect(await res.json()).toEqual({ id: "N1", subtaskId: "N2", timeBooked: true });
+      expect(seq(sp)).toEqual(["POST /tasks", "POST /tasks", "POST /tasks/N2/time"]);
+      expect(sp.calls[0]!.body).toEqual({ title: "Login", notes: "block", projectId: "A" });
+      expect(sp.calls[1]!.body).toEqual({ parentId: "N1", title: "17.11. · Login gefixt", notes: "block", isDone: true });
+      expect(sp.calls[2]!.body).toEqual({ date: "2026-11-17", duration: 9_000_000 });
+      expect(sp.calls[2]!.auth).toBe(`Bearer ${SP_TOKEN}`);
+      expect(sp.total("N1")).toBe(2.5 * H);
+      expect(sp.total("N2")).toBe(2.5 * H);
     });
 
-    test("append with hours books time after the patch", async () => {
-      const { sp, handle } = gwt({ ...appendOk, "POST /tasks/T/time": () => json({ ok: true }) });
-      const res = await handle(req("POST", "/tasks/T/append", { text: "neu", hours: 0.75 }));
+    test("append with hours: patch, then subtask with the appended block, time on it", async () => {
+      const sp = spModel();
+      sp.seed({ id: "T", title: "t", notes: "alt", projectId: "A" });
+      const { handle } = gwt(sp);
+      const res = await handle(req("POST", "/tasks/T/append", { text: "neu", hours: 0.75, logTitle: "Fix" }));
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ id: "T", timeBooked: true });
-      expect(sp.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /tasks/T", "PATCH /tasks/T", "POST /tasks/T/time"]);
-      expect(sp.calls[2]!.body).toEqual({ date: "2026-11-17", duration: 2_700_000 });
+      expect(await res.json()).toEqual({ id: "T", subtaskId: "N1", timeBooked: true });
+      expect(seq(sp)).toEqual(["GET /tasks/T", "PATCH /tasks/T", "POST /tasks", "POST /tasks/N1/time"]);
+      expect(sp.calls[1]!.body).toEqual({ notes: "alt\n\nneu" });
+      expect(sp.calls[2]!.body).toEqual({ parentId: "T", title: "17.11. · Fix", notes: "neu", isDone: true });
+      expect(sp.calls[3]!.body).toEqual({ date: "2026-11-17", duration: 2_700_000 });
+      expect(sp.total("T")).toBe(0.75 * H);
+    });
+
+    test("more than 24h on one day across two logs → two subtasks, both booked", async () => {
+      const sp = spModel();
+      sp.seed({ id: "T", title: "t", notes: "", projectId: "A" });
+      const { handle } = gwt(sp);
+      for (const title of ["Eins", "Zwei"]) {
+        const res = await handle(req("POST", "/tasks/T/append", { text: title, hours: 20, logTitle: title }));
+        expect(((await res.json()) as { timeBooked: boolean }).timeBooked).toBe(true);
+      }
+      expect(sp.get("T")!.subTaskIds).toEqual(["N1", "N2"]);
+      expect(sp.total("T")).toBe(40 * H);
+      expect(sp.day("T", "2026-11-17")).toBe(40 * H);
+    });
+
+    test("logTitle missing or null → subtask title falls back to Log", async () => {
+      for (const extra of [{}, { logTitle: null }]) {
+        const { sp, handle } = gwt(spModel());
+        await handle(req("POST", "/tasks", { projectId: "A", title: "X", notes: "", hours: 1, ...extra }));
+        expect((sp.calls[1]!.body as { title: string }).title).toBe("17.11. · Log");
+      }
+    });
+
+    test("invalid logTitle → 400 before anything is written", async () => {
+      for (const logTitle of ["", "x".repeat(201), 5, ["a"]]) {
+        const sp = spModel();
+        sp.seed({ id: "T", title: "t", notes: "", projectId: "A" });
+        const { handle } = gwt(sp);
+        const c = await handle(req("POST", "/tasks", { projectId: "A", title: "X", notes: "", hours: 1, logTitle }));
+        expect(c.status).toBe(400);
+        expect(await c.json()).toEqual({ error: "invalid-log-title" });
+        const a = await handle(req("POST", "/tasks/T/append", { text: "neu", hours: 1, logTitle }));
+        expect(a.status).toBe(400);
+        expect(sp.calls).toHaveLength(0);
+      }
+    });
+
+    for (const inherit of [true, false]) {
+      test(`legacy parent with direct time is converted first (SP inherits: ${inherit}), idempotently`, async () => {
+        const sp = spModel({ inherit });
+        sp.seed({ id: "T", title: "t", notes: "alt", projectId: "A", own: { "2026-11-15": 3 * H, "2026-11-17": 20 * H } });
+        const { handle } = gwt(sp);
+        const res = await handle(req("POST", "/tasks/T/append", { text: "neu", hours: 10, logTitle: "Mehr" }));
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ id: "T", subtaskId: "N2", timeBooked: true });
+        const legacy = sp.get("N1")!;
+        expect(legacy.title).toBe("Frühere Logs");
+        expect(legacy.isDone).toBe(true);
+        expect(legacy.parentId).toBe("T");
+        expect(sp.calls.find((c) => c.method === "POST" && c.path === "/tasks")!.body).toEqual({ parentId: "T", title: "Frühere Logs", isDone: true });
+        expect(sp.get("T")!.subTaskIds).toEqual(["N1", "N2"]);
+        expect(sp.day("N1", "2026-11-15")).toBe(3 * H);
+        expect(sp.day("N1", "2026-11-17")).toBe(20 * H);
+        expect(sp.total("N2")).toBe(10 * H);
+        expect(sp.total("T")).toBe(33 * H);
+
+        // A second log does not convert again.
+        const again = await handle(req("POST", "/tasks/T/append", { text: "noch", hours: 1, logTitle: "Noch" }));
+        expect(await again.json()).toEqual({ id: "T", subtaskId: "N3", timeBooked: true });
+        expect(sp.get("T")!.subTaskIds).toEqual(["N1", "N2", "N3"]);
+        expect(sp.calls.filter((c) => (c.body as { title?: string } | undefined)?.title === "Frühere Logs")).toHaveLength(1);
+        expect(sp.total("T")).toBe(34 * H);
+      });
+    }
+
+    test("legacy conversion fails → note kept, no log subtask, 200 with sp-convert-failed", async () => {
+      const sp = spModel({ failSubtask: true });
+      sp.seed({ id: "T", title: "t", notes: "", projectId: "A", own: { "2026-11-16": H } });
+      const { handle } = gwt(sp);
+      const res = await handle(req("POST", "/tasks/T/append", { text: "neu", hours: 1, logTitle: "x" }));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ id: "T", timeBooked: false, timeError: "sp-convert-failed" });
+      expect(sp.get("T")!.notes).toBe("neu");
+      expect(sp.calls.filter((c) => c.path === "/tasks")).toHaveLength(1);
     });
 
     test("duration is an integer of ms", async () => {
-      const { sp, handle } = gwt({ ...createOk, "POST /tasks/NEW1/time": () => json({ ok: true }) });
+      const { sp, handle } = gwt(spModel());
       await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours: 1 / 3 }));
-      const d = (sp.calls[1]!.body as { duration: number }).duration;
+      const d = (sp.calls[2]!.body as { duration: number }).duration;
       expect(Number.isInteger(d)).toBe(true);
       expect(d).toBe(1_200_000);
     });
 
-    test("hours 0, absent or null → no booking", async () => {
+    test("hours 0, absent or null → no subtask, no booking", async () => {
       for (const extra of [{ hours: 0 }, {}, { hours: null }]) {
-        const { sp, handle } = gwt({ ...createOk, ...appendOk });
+        const sp = spModel();
+        sp.seed({ id: "T", title: "t", notes: "", projectId: "A" });
+        const { handle } = gwt(sp);
         const c = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", ...extra }));
         expect(c.status).toBe(200);
-        expect(await c.json()).toEqual({ id: "NEW1" });
+        expect(await c.json()).toEqual({ id: "N1" });
         const a = await handle(req("POST", "/tasks/T/append", { text: "neu", ...extra }));
         expect(a.status).toBe(200);
         expect(await a.json()).toEqual({ id: "T" });
         expect(sp.calls.some((x) => x.path.endsWith("/time"))).toBe(false);
+        expect(sp.calls.filter((x) => x.method === "POST" && x.path === "/tasks")).toHaveLength(1);
       }
     });
 
     test("invalid hours → 400 before anything is written", async () => {
       for (const hours of [-1, 24.01, "2", Number.NaN, true, [1], {}]) {
-        const { sp, handle } = gwt({ ...createOk, ...appendOk });
+        const sp = spModel();
+        sp.seed({ id: "T", title: "t", notes: "", projectId: "A" });
+        const { handle } = gwt(sp);
         const body = JSON.stringify({ projectId: "A", title: "Log", notes: "", hours }).replace('"hours":null', '"hours":"NaN"');
         const c = await handle(req("POST", "/tasks", body));
         expect(c.status).toBe(400);
@@ -342,57 +425,182 @@ describe("gateway", () => {
     });
 
     test("hours 24 is allowed", async () => {
-      const { sp, handle } = gwt({ ...createOk, "POST /tasks/NEW1/time": () => json({ ok: true }) });
+      const { sp, handle } = gwt(spModel());
       const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours: 24 }));
-      expect(await res.json()).toEqual({ id: "NEW1", timeBooked: true });
-      expect(sp.calls[1]!.body).toEqual({ date: "2026-11-17", duration: 86_400_000 });
+      expect(await res.json()).toEqual({ id: "N1", subtaskId: "N2", timeBooked: true });
+      expect(sp.calls[2]!.body).toEqual({ date: "2026-11-17", duration: 86_400_000 });
     });
 
     test("rejected booking → 200 with timeBooked false", async () => {
-      const { handle } = gwt({
-        ...createOk,
-        "POST /tasks/NEW1/time": () => json({ ok: false, error: { message: "Task has subtasks" } }, 400),
-      });
+      const { handle } = gwt(spModel({ failTime: true }));
       const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours: 1 }));
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ id: "NEW1", timeBooked: false, timeError: "sp-time-rejected" });
+      expect(await res.json()).toEqual({ id: "N1", subtaskId: "N2", timeBooked: false, timeError: "sp-time-rejected" });
+    });
+
+    test("rejected subtask → 200 with sp-subtask-rejected, no booking", async () => {
+      const sp = spModel({ failSubtask: true });
+      const { handle } = gwt(sp);
+      const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours: 1 }));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ id: "N1", timeBooked: false, timeError: "sp-subtask-rejected" });
+      expect(sp.calls.some((x) => x.path.endsWith("/time"))).toBe(false);
     });
 
     test("unreachable SP during booking → 200 with sp-unreachable", async () => {
-      let n = 0;
-      const handle = createGateway({
-        spUrl: SP_URL,
-        spToken: () => SP_TOKEN,
-        gatewayToken: GW_TOKEN,
-        now: () => TODAY,
-        fetch: (async (input: RequestInfo | URL) => {
-          n++;
-          if (String(input).endsWith("/time")) throw new Error(`boom Bearer ${SP_TOKEN}`);
-          return json({ ok: true, data: { id: "T", notes: "", isDone: false } });
-        }) as unknown as typeof fetch,
-      });
+      const sp = spModel({ throwOnTime: true });
+      sp.seed({ id: "T", title: "t", notes: "", projectId: "A" });
+      const { handle } = gwt(sp);
       const res = await handle(req("POST", "/tasks/T/append", { text: "neu", hours: 1 }));
       expect(res.status).toBe(200);
       const text = await res.text();
-      expect(JSON.parse(text)).toEqual({ id: "T", timeBooked: false, timeError: "sp-unreachable" });
+      expect(JSON.parse(text)).toEqual({ id: "T", subtaskId: "N1", timeBooked: false, timeError: "sp-unreachable" });
       expect(text).not.toContain(SP_TOKEN);
-      expect(n).toBe(3);
     });
 
     test("failed create does not book", async () => {
-      const { sp, handle } = gwt({ "POST /tasks": () => json({ ok: false }, 500) });
+      const { sp, handle } = gwt(spModel({ failCreate: true }));
       const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours: 1 }));
       expect(res.status).toBe(502);
       expect(sp.calls).toHaveLength(1);
     });
 
     test("default date is the gateway's local today", async () => {
-      const sp = spFake({ ...createOk, "POST /tasks/NEW1/time": () => json({ ok: true }) });
+      const sp = spModel();
       const handle = createGateway({ spUrl: SP_URL, spToken: () => SP_TOKEN, gatewayToken: GW_TOKEN, fetch: sp.fetch });
       await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours: 1 }));
       const d = new Date();
       const pad = (x: number) => String(x).padStart(2, "0");
-      expect((sp.calls[1]!.body as { date: string }).date).toBe(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`);
+      expect((sp.calls[2]!.body as { date: string }).date).toBe(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`);
+      expect((sp.calls[1]!.body as { title: string }).title).toBe(`${pad(d.getDate())}.${pad(d.getMonth() + 1)}. · Log`);
     });
   });
+
+  test("gateway: candidate list excludes subtasks", async () => {
+    const sp = spModel();
+    sp.seed({ id: "P", title: "Parent", notes: "", projectId: "A" });
+    sp.seed({ id: "S", title: "Sub", notes: "", projectId: "A", parentId: "P" });
+    sp.seed({ id: "Q", title: "Other", notes: "", projectId: "A" });
+    const handle = createGateway({ spUrl: SP_URL, spToken: () => SP_TOKEN, gatewayToken: GW_TOKEN, fetch: sp.fetch });
+    const res = await handle(req("GET", "/projects/A/tasks"));
+    expect(((await res.json()) as Array<{ id: string }>).map((t) => t.id)).toEqual(["P", "Q"]);
+  });
 });
+
+// Stateful fake of the SP 20 Local REST task API, with its rules: subtasks
+// must not carry projectId/tagIds, tasks with subtasks reject time, one task
+// takes at most 24h per day, and a parent's time is the sum of its subtasks.
+type FakeTask = {
+  id: string;
+  title: string;
+  notes: string;
+  projectId: string;
+  parentId?: string;
+  isDone: boolean;
+  subTaskIds: string[];
+  own: Record<string, number>;
+};
+type SpModel = ReturnType<typeof spModel>;
+
+function spModel(opts: { inherit?: boolean; failTime?: boolean; failSubtask?: boolean; throwOnTime?: boolean; failCreate?: boolean } = {}) {
+  const inherit = opts.inherit ?? true;
+  const tasks = new Map<string, FakeTask>();
+  const calls: Call[] = [];
+  let n = 0;
+  const DAY = 86_400_000;
+
+  function day(id: string, date: string): number {
+    const t = tasks.get(id)!;
+    if (t.subTaskIds.length > 0) return t.subTaskIds.reduce((s, sid) => s + day(sid, date), 0);
+    return t.own[date] ?? 0;
+  }
+  function days(id: string): Record<string, number> {
+    const t = tasks.get(id)!;
+    if (t.subTaskIds.length === 0) return { ...t.own };
+    const out: Record<string, number> = {};
+    for (const sid of t.subTaskIds) for (const [d, v] of Object.entries(days(sid))) out[d] = (out[d] ?? 0) + v;
+    return out;
+  }
+  function total(id: string): number {
+    return Object.values(days(id)).reduce((s, v) => s + v, 0);
+  }
+  function view(t: FakeTask) {
+    const tsod = days(t.id);
+    return {
+      id: t.id,
+      title: t.title,
+      notes: t.notes,
+      projectId: t.projectId,
+      ...(t.parentId ? { parentId: t.parentId } : {}),
+      isDone: t.isDone,
+      subTaskIds: [...t.subTaskIds],
+      timeSpentOnDay: tsod,
+      timeSpent: Object.values(tsod).reduce((s, v) => s + v, 0),
+    };
+  }
+  const bad = (msg: string) => json({ ok: false, error: { code: "INVALID_INPUT", message: msg } }, 400);
+
+  const fetchStub = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    const method = (init?.method ?? "GET").toUpperCase();
+    const raw = init?.body;
+    const body = typeof raw === "string" ? (JSON.parse(raw) as Record<string, unknown>) : undefined;
+    calls.push({ method, path: url.pathname + url.search, auth: new Headers(init?.headers).get("authorization"), body });
+    const p = url.pathname;
+    if (method === "GET" && p === "/tasks") {
+      const pid = url.searchParams.get("projectId");
+      return json({ ok: true, data: [...tasks.values()].filter((t) => !t.isDone && t.projectId === pid).map(view) });
+    }
+    if (method === "POST" && p === "/tasks") {
+      const b = body ?? {};
+      if (typeof b.parentId === "string") {
+        if (opts.failSubtask) return bad("nope");
+        if ("projectId" in b || "tagIds" in b) return bad("subtask with projectId");
+        const parent = tasks.get(b.parentId);
+        if (!parent) return json({ ok: false }, 404);
+        const id = `N${++n}`;
+        const own = inherit && parent.subTaskIds.length === 0 ? { ...parent.own } : {};
+        tasks.set(id, { id, title: String(b.title), notes: String(b.notes ?? ""), projectId: parent.projectId, parentId: parent.id, isDone: b.isDone === true, subTaskIds: [], own });
+        parent.subTaskIds.push(id);
+        parent.own = {};
+        return json({ ok: true, data: view(tasks.get(id)!) });
+      }
+      if (opts.failCreate) return json({ ok: false }, 500);
+      const id = `N${++n}`;
+      tasks.set(id, { id, title: String(b.title), notes: String(b.notes ?? ""), projectId: String(b.projectId), isDone: false, subTaskIds: [], own: {} });
+      return json({ ok: true, data: view(tasks.get(id)!) });
+    }
+    const m = /^\/tasks\/([^/]+)(\/time)?$/.exec(p);
+    const t = m ? tasks.get(m[1]!) : undefined;
+    if (!m || !t) return json({ ok: false, error: "not found" }, 404);
+    if (!m[2] && method === "GET") return json({ ok: true, data: view(t) });
+    if (!m[2] && method === "PATCH") {
+      if (typeof body?.notes === "string") t.notes = body.notes;
+      return json({ ok: true, data: view(t) });
+    }
+    if (m[2] && method === "POST") {
+      if (opts.throwOnTime) throw new Error(`boom Bearer ${SP_TOKEN}`);
+      if (opts.failTime) return bad("rejected");
+      const date = body?.date as string;
+      const duration = body?.duration as number;
+      if (!Number.isInteger(duration) || duration < 1 || duration > DAY) return bad("duration");
+      if (t.subTaskIds.length > 0) return bad("Task has subtasks");
+      if ((t.own[date] ?? 0) + duration > DAY) return bad("Time spent on one day cannot exceed 24h");
+      t.own[date] = (t.own[date] ?? 0) + duration;
+      return json({ ok: true, data: view(t) });
+    }
+    return json({ ok: false }, 404);
+  }) as typeof fetch;
+
+  return {
+    calls,
+    fetch: fetchStub,
+    get: (id: string) => tasks.get(id),
+    day,
+    total,
+    seed(t: { id: string; title: string; notes: string; projectId: string; parentId?: string; own?: Record<string, number> }) {
+      tasks.set(t.id, { ...t, isDone: false, subTaskIds: [], own: t.own ?? {} });
+      if (t.parentId) tasks.get(t.parentId)!.subTaskIds.push(t.id);
+    },
+  };
+}

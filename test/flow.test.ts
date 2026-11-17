@@ -66,8 +66,8 @@ function setup(opts: {
   closeOnDone?: () => boolean;
 } = {}) {
   const calls = {
-    create: [] as { projectId: string; title: string; notes: string; hours: number }[],
-    append: [] as { taskId: string; text: string; hours: number }[],
+    create: [] as { projectId: string; title: string; notes: string; hours: number; logTitle: string }[],
+    append: [] as { taskId: string; text: string; hours: number; logTitle: string }[],
     tasks: [] as string[],
     generate: [] as GenerateRequest[],
     setProject: [] as { dir: string; id: string }[],
@@ -95,14 +95,14 @@ function setup(opts: {
       calls.tasks.push(projectId);
       return tasks;
     },
-    create: async (projectId, title, notes, hours) => {
-      calls.create.push({ projectId, title, notes, hours });
+    create: async (projectId, title, notes, hours, logTitle) => {
+      calls.create.push({ projectId, title, notes, hours, logTitle });
       const r = opts.create?.() ?? "new1";
       if (r instanceof Error) throw r;
       return typeof r === "string" ? { id: r, timeBooked: true, timeError: null } : r;
     },
-    append: async (taskId, text, hours) => {
-      calls.append.push({ taskId, text, hours });
+    append: async (taskId, text, hours, logTitle) => {
+      calls.append.push({ taskId, text, hours, logTitle });
       const r = opts.append?.(taskId) ?? taskId;
       if (r instanceof Error) throw r;
       return typeof r === "string" ? { id: r, timeBooked: true, timeError: null } : r;
@@ -564,6 +564,19 @@ describe("flow", () => {
     b.flow.edit({ hours: 0.75 });
     await b.flow.save();
     expect(b.calls.append[0]!.hours).toBe(0.75);
+  });
+
+  test("flow: passes the draft title as logTitle to create and append", async () => {
+    const a = setup();
+    await a.flow.start(a.item);
+    a.flow.edit({ title: "  Neuer Titel  " });
+    await a.flow.save();
+    expect(a.calls.create[0]!.logTitle).toBe("Neuer Titel");
+    const b = setup();
+    await b.flow.start(b.item);
+    b.flow.setTarget("t2");
+    await b.flow.save();
+    expect(b.calls.append[0]!.logTitle).toBe("Login gefixt");
   });
 
   test("flow: time not booked → error toast, still binds and finishes", async () => {

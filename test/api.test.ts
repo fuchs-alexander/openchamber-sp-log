@@ -45,34 +45,34 @@ function fakeHost(reply: (req: GuestRequest) => Reply = () => ({ status: 200, bo
 describe("api", () => {
   test("sends string body", async () => {
     const { host, requests } = fakeHost(() => ({ status: 200, body: '{"id":"t1"}' }));
-    const saved = await createApi(host).create("p1", "Titel", "Notiz", 1.5);
+    const saved = await createApi(host).create("p1", "Titel", "Notiz", 1.5, "Log-Titel");
     expect(saved).toEqual({ id: "t1", timeBooked: null, timeError: null });
     expect(requests).toEqual([
       {
         method: "POST",
         path: "/tasks",
-        body: JSON.stringify({ projectId: "p1", title: "Titel", notes: "Notiz", hours: 1.5 }),
+        body: JSON.stringify({ projectId: "p1", title: "Titel", notes: "Notiz", hours: 1.5, logTitle: "Log-Titel" }),
       },
     ]);
   });
 
   test("append sends string body to encoded path", async () => {
     const { host, requests } = fakeHost(() => ({ status: 200, body: { id: "a/b" } }));
-    expect(await createApi(host).append("a/b", "Text", 0.5)).toEqual({ id: "a/b", timeBooked: null, timeError: null });
+    expect(await createApi(host).append("a/b", "Text", 0.5, "Fix")).toEqual({ id: "a/b", timeBooked: null, timeError: null });
     expect(requests[0]).toEqual({
       method: "POST",
       path: "/tasks/a%2Fb/append",
-      body: JSON.stringify({ text: "Text", hours: 0.5 }),
+      body: JSON.stringify({ text: "Text", hours: 0.5, logTitle: "Fix" }),
     });
   });
 
   test("surfaces timeBooked and timeError", async () => {
     const booked = fakeHost(() => ({ status: 200, body: { id: "t1", timeBooked: true } }));
-    expect(await createApi(booked.host).create("p1", "T", "N", 1)).toEqual({ id: "t1", timeBooked: true, timeError: null });
+    expect(await createApi(booked.host).create("p1", "T", "N", 1, "T")).toEqual({ id: "t1", timeBooked: true, timeError: null });
     const failed = fakeHost(() => ({ status: 200, body: { id: "t1", timeBooked: false, timeError: "sp-time-rejected" } }));
-    expect(await createApi(failed.host).append("t1", "x", 1)).toEqual({ id: "t1", timeBooked: false, timeError: "sp-time-rejected" });
+    expect(await createApi(failed.host).append("t1", "x", 1, "x")).toEqual({ id: "t1", timeBooked: false, timeError: "sp-time-rejected" });
     const odd = fakeHost(() => ({ status: 200, body: { id: "t1", timeBooked: "yes", timeError: 5 } }));
-    expect(await createApi(odd.host).append("t1", "x", 1)).toEqual({ id: "t1", timeBooked: null, timeError: null });
+    expect(await createApi(odd.host).append("t1", "x", 1, "x")).toEqual({ id: "t1", timeBooked: null, timeError: null });
   });
 
   test("parses string and object bodies", async () => {
@@ -89,7 +89,7 @@ describe("api", () => {
   test("task-gone", async () => {
     const { host } = fakeHost(() => ({ status: 404, body: '{"error":"task-gone"}' }));
     const err = await createApi(host)
-      .append("t1", "x", 1)
+      .append("t1", "x", 1, "x")
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(GatewayError);
     expect((err as GatewayError).status).toBe(404);

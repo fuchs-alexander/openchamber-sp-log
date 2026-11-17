@@ -114,11 +114,12 @@ export function createApi(host: HostLike) {
       const path = `/projects/${encodeURIComponent(projectId)}/tasks`;
       return listOf(await call({ method: "GET", path })) as MatchCandidate[];
     },
-    async create(projectId: string, title: string, notes: string, hours: number): Promise<SaveResult> {
-      return saveResultOf(await call(post("/tasks", { projectId, title, notes, hours })));
+    /** `logTitle`: the draft title; the gateway names the log's SP subtask after it. */
+    async create(projectId: string, title: string, notes: string, hours: number, logTitle: string): Promise<SaveResult> {
+      return saveResultOf(await call(post("/tasks", { projectId, title, notes, hours, logTitle })));
     },
-    async append(taskId: string, text: string, hours: number): Promise<SaveResult> {
-      return saveResultOf(await call(post(`/tasks/${encodeURIComponent(taskId)}/append`, { text, hours })));
+    async append(taskId: string, text: string, hours: number, logTitle: string): Promise<SaveResult> {
+      return saveResultOf(await call(post(`/tasks/${encodeURIComponent(taskId)}/append`, { text, hours, logTitle })));
     },
   };
 }
