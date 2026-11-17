@@ -1,4 +1,4 @@
-import { draftFromJson, WORK_RULES, type Draft } from "./draft.ts";
+import { draftFromJson, SESSION_WORK_RULES, type Draft } from "./draft.ts";
 
 /** How much of a logged message the prompt quotes to mark where the last log ended. */
 export const SINCE_HINT_MAX = 200;
@@ -21,10 +21,10 @@ export function buildSessionDraftPrompt(logId: string, sinceLogId: string | null
     `Erstelle einen Arbeitslog-Eintrag für die Arbeit in dieser Session. ${scope(sinceLogId, sinceMessageHint)}`,
     "Verwende keine Tools.",
     "",
-    WORK_RULES,
+    SESSION_WORK_RULES,
     "",
     "Antworte ausschließlich mit diesem JSON, ohne weiteren Text:",
-    `{"logId":${JSON.stringify(logId)},"title":"…","summary":"…","hours":0}`,
+    `{"logId":${JSON.stringify(logId)},"titel":"…","zusammenfassung":"…","stunden":0}`,
   ].join("\n");
 }
 
@@ -69,5 +69,11 @@ export function parseSessionDraft(text: string, logId: string): Draft | null {
       // not JSON, skip
     }
   }
-  return match ? draftFromJson(match) : null;
+  if (!match) return null;
+  // German keys as requested by the prompt; the English ones from before stay accepted.
+  return draftFromJson({
+    title: match.titel ?? match.title,
+    summary: match.zusammenfassung ?? match.summary,
+    hours: match.stunden ?? match.hours,
+  });
 }

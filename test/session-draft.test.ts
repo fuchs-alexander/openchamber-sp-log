@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { WORK_RULES } from "../src/log/draft.ts";
+import { SESSION_WORK_RULES, WORK_RULES } from "../src/log/draft.ts";
 import { buildSessionDraftPrompt, parseSessionDraft } from "../src/log/session-draft.ts";
 
 describe("buildSessionDraftPrompt", () => {
@@ -9,7 +9,19 @@ describe("buildSessionDraftPrompt", () => {
     expect(prompt.startsWith("[SP-Log-Anfrage L1]")).toBe(true);
     expect(prompt).toContain('"logId":"L1"');
     expect(prompt).toContain("Verwende keine Tools.");
-    expect(prompt).toContain(WORK_RULES);
+    expect(prompt).toContain(SESSION_WORK_RULES);
+  });
+
+  test("uses German JSON keys so OpenChamber shows no pull request card", () => {
+    expect(prompt).toContain('{"logId":"L1","titel":"…","zusammenfassung":"…","stunden":0}');
+    expect(prompt).not.toContain('"title"');
+    expect(prompt).not.toContain('"summary"');
+    expect(prompt).not.toContain('"hours"');
+    expect(prompt).not.toMatch(/\b(summary|hours)\b/);
+  });
+
+  test("session rules keep the meaning of WORK_RULES with German key names", () => {
+    expect(SESSION_WORK_RULES).toBe(WORK_RULES.replaceAll("summary", "zusammenfassung").replaceAll("hours", "stunden"));
   });
 
   test("without a saved log the whole session counts", () => {
@@ -35,6 +47,20 @@ describe("buildSessionDraftPrompt", () => {
 });
 
 describe("parseSessionDraft", () => {
+  test("German keys", () => {
+    const text = '{"logId":"L1","titel":"Login repariert","zusammenfassung":"Fix.","stunden":2}';
+    expect(parseSessionDraft(text, "L1")).toEqual({ title: "Login repariert", summary: "Fix.", hours: 2 });
+  });
+
+  test("German keys: invalid stunden and wrong logId", () => {
+    expect(parseSessionDraft('{"logId":"L1","titel":"X","zusammenfassung":"S","stunden":99}', "L1")).toEqual({
+      title: "X",
+      summary: "S",
+      hours: null,
+    });
+    expect(parseSessionDraft('{"logId":"L2","titel":"X","zusammenfassung":"S","stunden":1}', "L1")).toBeNull();
+  });
+
   test("plain", () => {
     const text = '{"logId":"L1","title":"Login repariert","summary":"Fix.","hours":2}';
     expect(parseSessionDraft(text, "L1")).toEqual({ title: "Login repariert", summary: "Fix.", hours: 2 });
