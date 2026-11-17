@@ -59,6 +59,17 @@ function asBinding(value: unknown): Binding | null {
   };
 }
 
+/** A log saved to Super Productivity, kept under `saved:<logId>` so every frame knows it is done. */
+export type SavedLog = { taskTitle: string; hours: number; at: number };
+
+function asSaved(value: unknown): SavedLog | null {
+  if (!value || typeof value !== "object") return null;
+  const { taskTitle, hours, at } = value as { taskTitle?: unknown; hours?: unknown; at?: unknown };
+  if (typeof taskTitle !== "string" || typeof hours !== "number" || !Number.isFinite(hours)) return null;
+  if (typeof at !== "number" || !Number.isFinite(at)) return null;
+  return { taskTitle, hours, at };
+}
+
 export function createStore(host: HostLike) {
   return {
     async getProject(dir: string): Promise<string | null> {
@@ -86,6 +97,22 @@ export function createStore(host: HostLike) {
     },
     async clearBinding(sessionId: string): Promise<void> {
       await host.storage.delete(`session:${sessionId}`, OPTS);
+    },
+    async getSaved(logId: string): Promise<SavedLog | null> {
+      return asSaved(await host.storage.get(`saved:${logId}`, OPTS));
+    },
+    async setSaved(logId: string, s: SavedLog): Promise<void> {
+      await host.storage.set(`saved:${logId}`, { taskTitle: s.taskTitle, hours: s.hours, at: s.at }, OPTS);
+    },
+    /** When the session-draft request `logId` was sent, or its card first shown (ms); null: unknown. */
+    async getSeen(logId: string): Promise<number | null> {
+      const v = await host.storage.get(`seen:${logId}`, OPTS);
+      return typeof v === "number" && Number.isFinite(v) ? v : null;
+    },
+    /** Keeps the first time only. */
+    async markSeen(logId: string, at: number): Promise<void> {
+      if ((await this.getSeen(logId)) !== null) return;
+      await host.storage.set(`seen:${logId}`, at, OPTS);
     },
   };
 }

@@ -39,8 +39,8 @@ function setup(bindings: Record<string, Binding | null> = {}) {
       calls.cancel++;
     },
   };
-  const emit = (phase: FlowState["phase"]) => {
-    state = { ...state, phase };
+  const emit = (phase: FlowState["phase"], message: string | null = null) => {
+    state = { ...state, phase, message };
     for (const fn of listeners) fn(state);
   };
   const timers: { ms: number; fn: () => void; cancelled: boolean }[] = [];
@@ -52,6 +52,7 @@ function setup(bindings: Record<string, Binding | null> = {}) {
         calls.getBinding.push(id);
         return bindings[id] ?? null;
       },
+      getSaved: async () => null,
     },
     now: () => new Date(2026, 10, 17, 15),
     delay: (ms, fn) => {
@@ -483,5 +484,39 @@ describe("status controller: logging while the session works", () => {
     expect(ctrl.view.mode).toBe("summary");
     expect(w.storage.has("pending:s1")).toBe(false);
     expect(w.posts).toHaveLength(0);
+  });
+});
+
+describe("status controller: log saved through the chat card", () => {
+  test("a pending request whose log the card saved is cleared, not continued", async () => {
+    const w = world();
+    const first = w.frame();
+    first.ctrl.setDirectory("/repo");
+    first.ctrl.setSession({ id: "s1", title: "Session A" });
+    await tick();
+    first.ctrl.startLogging();
+    await until(() => first.flow.state.phase === "pick-project", "pick-project");
+    void first.flow.chooseProject("p1");
+    await until(() => w.posts.length === 1, "request");
+    const logId = w.posts[0]!;
+    first.flow.cancel();
+    expect(w.storage.get("pending:s1")).toMatchObject({ logId });
+
+    // The card saved this log meanwhile.
+    w.storage.set(`saved:${logId}`, { taskTitle: "Login gefixt", hours: 6, at: 1 });
+    const second = w.frame();
+    second.ctrl.setSession({ id: "s1", title: "Session A" });
+    for (let i = 0; i < 20; i++) await tick();
+    expect(second.ctrl.view.mode).toBe("summary");
+    expect(w.storage.has("pending:s1")).toBe(false);
+  });
+
+  test("done with a message: the logged view shows it", async () => {
+    const { ctrl, emit, view } = setup();
+    ctrl.setSession({ id: "s1", title: "Session A" });
+    await tick();
+    ctrl.startLogging();
+    emit("done", "Bereits über die Karte gespeichert.");
+    expect(view()).toEqual({ mode: "logged", note: "Bereits über die Karte gespeichert." });
   });
 });

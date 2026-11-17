@@ -3,7 +3,7 @@ import { HostRequestError, type GenerateRequest, type GuestRequest, type GuestRe
 import type { Msg } from "../src/log/draft.ts";
 import type { MatchCandidate } from "../src/log/match.ts";
 import { GatewayError, type Api, type BoundTask, type HostLike, type SaveResult, type SpProject } from "../src/panel/api.ts";
-import type { Binding, Store } from "../src/panel/store.ts";
+import type { Binding, PendingStore, SavedLog, Store } from "../src/panel/store.ts";
 import { createFlow } from "../src/panel/flow.ts";
 import { formatSinceTime } from "../src/log/session-draft.ts";
 
@@ -67,6 +67,9 @@ function setup(opts: {
   now?: () => Date;
   ids?: string[];
   closeOnDone?: () => boolean;
+  /** `saved:<logId>` markers already in storage. */
+  saved?: Record<string, SavedLog>;
+  pending?: Pick<PendingStore, "set" | "clear">;
 } = {}) {
   const calls = {
     create: [] as { projectId: string; title: string; notes: string; hours: number; logTitle: string }[],
@@ -80,7 +83,10 @@ function setup(opts: {
     toast: [] as { kind: string; message: string }[],
     close: 0,
     service: [] as GuestRequest[],
+    setSaved: [] as { logId: string; s: SavedLog }[],
+    markSeen: [] as { logId: string; at: number }[],
   };
+  const saved = new Map<string, SavedLog>(Object.entries(opts.saved ?? {}));
   const tasks = opts.tasks ?? [
     { id: "t1", title: "Login-Bug", notesExcerpt: "" },
     { id: "t2", title: "Doku", notesExcerpt: "" },
@@ -138,6 +144,15 @@ function setup(opts: {
       calls.clearBinding.push(sessionId);
       binding = null;
     },
+    getSaved: async (logId) => saved.get(logId) ?? null,
+    setSaved: async (logId, s) => {
+      calls.setSaved.push({ logId, s });
+      saved.set(logId, s);
+    },
+    getSeen: async () => null,
+    markSeen: async (logId, at) => {
+      calls.markSeen.push({ logId, at });
+    },
   };
   const host: HostLike = {
     request: async () => ({ status: 200, body: "{}" }) as never,
@@ -170,9 +185,10 @@ function setup(opts: {
     newId: () => ids.shift() ?? "log-x",
     sleep: () => new Promise((r) => setTimeout(r, 0)),
     closeOnDone: opts.closeOnDone,
+    pending: opts.pending,
   });
   const item = { sessionId: "s1", sessionTitle: "Session A", directory: "/repo" as string | null, messages: MESSAGES };
-  return { flow, calls, item };
+  return { flow, calls, item, saved };
 }
 
 describe("flow: session draft", () => {
@@ -902,5 +918,118 @@ describe("flow: sinceTime for the multi-commit estimate", () => {
     const { flow, calls, item } = setup({ service: answeringService });
     await flow.start({ ...item, messages: [] });
     expect(promptOf(calls.service[0]!)).not.toContain("Zeitpunkt der Grenze");
+  });
+});
+
+const ALREADY = "Bereits über die Karte gespeichert.";
+const CARD = {
+  sessionId: "s1",
+  sessionTitle: "Session A",
+  directory: "/repo" as string | null,
+  logId: "card-1",
+  draft: { title: "Von der Karte", summary: "Karten-Zusammenfassung.", hours: 1.25 },
+};
+
+describe("flow: startWithDraft (chat card)", () => {
+  test("skips the session draft and goes straight to the match suggestion", async () => {
+    const { flow, calls } = setup({ service: answeringService, generate: [JSON.stringify({ taskId: "t2", reason: "passt" })] });
+    await flow.startWithDraft(CARD);
+    expect(flow.state.phase).toBe("ready");
+    expect(flow.state.draft).toEqual(CARD.draft);
+    expect(flow.state.target).toBe("t2");
+    expect(flow.state.message).toBeNull();
+    expect(calls.service.filter((r) => r.path === "/draft")).toHaveLength(0);
+    expect(calls.generate).toHaveLength(1);
+    expect(calls.generate[0]!.prompt).toContain("Von der Karte");
+  });
+
+  test("a bound session targets the bound task, also when it is done", async () => {
+    const { flow, calls } = setup({
+      binding: { taskId: "t9", lastMessageId: null, lastCreatedAt: null, lastLogId: "old", ...LEGACY },
+      task: (id) => (id === "t9" ? { id: "t9", title: "Erledigt", isDone: true } : null),
+    });
+    await flow.startWithDraft(CARD);
+    expect(flow.state.phase).toBe("ready");
+    expect(flow.state.target).toBe("t9");
+    expect(flow.state.tasks[0]).toMatchObject({ id: "t9", isDone: true });
+    expect(calls.generate).toHaveLength(0);
+  });
+
+  test("no project mapping: pick-project, then ready with the card's draft", async () => {
+    const { flow } = setup({ project: null });
+    await flow.startWithDraft(CARD);
+    expect(flow.state.phase).toBe("pick-project");
+    await flow.chooseProject("p1");
+    expect(flow.state.phase).toBe("ready");
+    expect(flow.state.draft).toEqual(CARD.draft);
+  });
+
+  test("saving does what save does, with the card's logId and without closing", async () => {
+    const { flow, calls, saved } = setup({ closeOnDone: () => false, generate: [JSON.stringify({ taskId: null, reason: "" })] });
+    await flow.startWithDraft(CARD);
+    flow.edit({ hours: 2 });
+    await flow.save();
+    expect(flow.state.phase).toBe("done");
+    expect(calls.create).toMatchObject([{ projectId: "p1", title: "Von der Karte", hours: 2, logTitle: "Von der Karte" }]);
+    expect(calls.setBinding.at(-1)!.b).toMatchObject({ taskId: "new1", lastLogId: "card-1", taskTitle: "Von der Karte", projectTitle: "Projekt 1", directory: "/repo" });
+    expect(calls.service.filter((r) => r.path === "/logged")).toHaveLength(1);
+    expect(calls.toast).toEqual([{ kind: "success", message: "In Super Productivity geloggt" }]);
+    expect(calls.close).toBe(0);
+    expect(saved.get("card-1")).toEqual({ taskTitle: "Von der Karte", hours: 2, at: new Date(2026, 10, 17, 12).getTime() });
+  });
+
+  test("an already saved card log ends at once without the gateway", async () => {
+    const { flow, calls } = setup({ saved: { "card-1": { taskTitle: "X", hours: 1, at: 1 } } });
+    await flow.startWithDraft(CARD);
+    expect(flow.state.phase).toBe("done");
+    expect(flow.state.message).toBe(ALREADY);
+    expect(calls.create).toHaveLength(0);
+    expect(calls.tasks).toHaveLength(0);
+  });
+});
+
+describe("flow: saved marker and double-save guard", () => {
+  test("a session-draft save writes saved:<logId>; a Small Model save does not", async () => {
+    const a = setup({ service: answeringService });
+    await a.flow.start(a.item);
+    await a.flow.save();
+    expect(a.calls.setSaved).toEqual([{ logId: "log-1", s: { taskTitle: "Aus der Session", hours: 1.5, at: new Date(2026, 10, 17, 12).getTime() } }]);
+
+    const b = setup();
+    await b.flow.start(b.item);
+    await b.flow.save();
+    expect(b.flow.state.phase).toBe("done");
+    expect(b.calls.setSaved).toHaveLength(0);
+  });
+
+  test("the request time is kept as seen:<logId>", async () => {
+    const { flow, calls, item } = setup({ service: answeringService });
+    await flow.start(item);
+    expect(calls.markSeen).toEqual([{ logId: "log-1", at: new Date(2026, 10, 17, 12).getTime() }]);
+  });
+
+  test("status/dialog save of a log already saved by the card: done, no gateway, pending cleared", async () => {
+    const cleared: { sessionId: string; logId?: string }[] = [];
+    const pending = { set: async () => {}, clear: async (sessionId: string, logId?: string) => void cleared.push({ sessionId, logId }) };
+    const { flow, calls, item, saved } = setup({ service: answeringService, pending });
+    await flow.start(item);
+    expect(flow.state.phase).toBe("ready");
+    saved.set("log-1", { taskTitle: "Login-Bug", hours: 1.5, at: 5 });
+    await flow.save();
+    expect(flow.state.phase).toBe("done");
+    expect(flow.state.message).toBe(ALREADY);
+    expect(calls.create).toHaveLength(0);
+    expect(calls.append).toHaveLength(0);
+    expect(calls.setBinding).toHaveLength(0);
+    expect(calls.service.filter((r) => r.path === "/logged")).toHaveLength(0);
+    expect(cleared).toContainEqual({ sessionId: "s1", logId: undefined });
+  });
+
+  test("resuming a request whose log is already saved ends at once", async () => {
+    const { flow, calls, item } = setup({ service: answeringService, saved: { "log-7": { taskTitle: "X", hours: 1, at: 1 } } });
+    await flow.start({ ...item, messages: [], resume: { logId: "log-7", startedAt: new Date(2026, 10, 17, 11).getTime() } });
+    expect(flow.state.phase).toBe("done");
+    expect(flow.state.message).toBe(ALREADY);
+    expect(calls.service.filter((r) => r.path === "/draft")).toHaveLength(0);
   });
 });

@@ -10,20 +10,21 @@ export const LOGGED_MS = 1500;
  * What the SP Log work status shows:
  * - `summary`: the binding lines (the hint last) and the log button (null without session);
  * - `flow`: the log flow inline;
- * - `logged`: „Geloggt ✓“ right after a save.
+ * - `logged`: „Geloggt ✓“ right after a save; `note` instead when the flow ended with a
+ *   message (the log was already saved through the chat card).
  */
 type Summary = { mode: "summary"; lines: string[]; button: string | null };
 
 export type StatusView =
   | Summary
   | { mode: "flow" }
-  | { mode: "logged" };
+  | { mode: "logged"; note?: string };
 
 type Session = { id: string; title: string };
 
 export function createStatusController(deps: {
   flow: Pick<Flow, "state" | "subscribe" | "start" | "cancel">;
-  store: Pick<Store, "getBinding">;
+  store: Pick<Store, "getBinding" | "getSaved">;
   /** Open session-draft requests; a new frame continues the session's one. */
   pending?: Pick<PendingStore, "get" | "clear">;
   now: () => Date;
@@ -88,7 +89,9 @@ export function createStatusController(deps: {
     if (!pending) return null;
     const open = await pending.get(id).catch(() => null);
     if (!open) return null;
-    if (now().getTime() - open.startedAt < DRAFT_WAIT_MS) return open;
+    // Saved meanwhile (e.g. through the chat card): nothing left to continue.
+    const saved = await store.getSaved(open.logId).catch(() => null);
+    if (!saved && now().getTime() - open.startedAt < DRAFT_WAIT_MS) return open;
     await pending.clear(id, open.logId).catch(() => {});
     return null;
   }
@@ -100,7 +103,7 @@ export function createStatusController(deps: {
 
   flow.subscribe((s) => {
     if (view.mode !== "flow" || s.phase !== "done") return;
-    show({ mode: "logged" });
+    show(s.message ? { mode: "logged", note: s.message } : { mode: "logged" });
     dropTimer = delay(LOGGED_MS, () => {
       dropTimer = null;
       toSummary();

@@ -43,7 +43,7 @@ function render(view: StatusView): void {
   flowView?.dispose();
   flowView = null;
   if (view.mode === "logged") {
-    root.replaceChildren(paragraph("Geloggt ✓", "splog-notice ok"));
+    root.replaceChildren(paragraph(view.note ?? "Geloggt ✓", "splog-notice ok"));
   } else {
     const lines = document.createElement("div");
     lines.className = "lines";

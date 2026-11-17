@@ -35,6 +35,15 @@ export type FlowItem = {
   resume?: { logId: string; startedAt: number };
 };
 
+/** A draft the SpLogDraft chat card already holds: no new request, straight to the target. */
+export type CardItem = {
+  sessionId: string;
+  sessionTitle: string;
+  directory: string | null;
+  logId: string;
+  draft: Draft;
+};
+
 const EMPTY_DRAFT: Draft = { title: "", summary: "", hours: null };
 
 const TEXT = {
@@ -55,6 +64,7 @@ const TEXT = {
   sessionFallback: "Session-Entwurf nicht verfügbar – Entwurf vom Small Model.",
   sessionWaitingFallback: "Session wartet auf deine Eingabe – Entwurf vom Small Model.",
   noSessionDraft: "Session-Entwurf nicht möglich – bitte über … → Export → Nach Super Productivity loggen.",
+  alreadySaved: "Bereits über die Karte gespeichert.",
 };
 
 /** How often and how long the panel asks the service for the session's draft. */
@@ -154,6 +164,8 @@ export function createFlow(deps: {
     if (!resume) {
       // Kept before sending, so a frame unmounted meanwhile still finds it.
       if (remember) await pending!.set(sessionId, { logId, startedAt, directory: current.directory || null }).catch(() => {});
+      // Its card in the chat compares this time with later saves (stale or not).
+      await store.markSeen(logId, startedAt).catch(() => {});
       try {
         await drafts.start(sessionId, logId, buildSessionDraftPrompt(logId, since.logId, since.hint, since.time));
       } catch (err) {
@@ -315,16 +327,30 @@ export function createFlow(deps: {
     set({ phase: "ready", tasks, target, message: notes.length > 0 ? notes.join(" ") : null });
   }
 
-  async function start(next: FlowItem): Promise<void> {
+  /** Whether the log `logId` was already saved (by the card or another frame); ends the flow then. */
+  async function alreadySaved(run: number, logId: string | null): Promise<boolean> {
+    if (!logId) return false;
+    const saved = await store.getSaved(logId).catch(() => null);
+    if (!saved || run !== runId) return false;
+    await pending?.clear(item!.sessionId, logId).catch(() => {});
+    if (run === runId) set({ phase: "done", message: TEXT.alreadySaved });
+    return true;
+  }
+
+  async function begin(next: FlowItem, preset: Drafted | null): Promise<void> {
     const run = ++runId;
     item = next;
     directory = next.directory || "global";
     binding = null;
-    draftPromise = null;
+    draftPromise = preset ? Promise.resolve(preset) : null;
     draftApplied = false;
     draftLogId = null;
     state = initialState();
     set({});
+
+    const logId = preset?.logId ?? next.resume?.logId ?? null;
+    if (await alreadySaved(run, logId)) return;
+    if (run !== runId) return;
 
     let projects: SpProject[];
     let projectId: string | null;
@@ -345,6 +371,16 @@ export function createFlow(deps: {
       return;
     }
     await loadProject(run, projectId, true);
+  }
+
+  function start(next: FlowItem): Promise<void> {
+    return begin(next, null);
+  }
+
+  /** The chat card's draft: no session-draft request, the card's logId is the one saved. */
+  function startWithDraft(card: CardItem): Promise<void> {
+    const next: FlowItem = { sessionId: card.sessionId, sessionTitle: card.sessionTitle, directory: card.directory, messages: [] };
+    return begin(next, { draft: card.draft, failed: false, logPointLost: false, fallback: null, logId: card.logId });
   }
 
   async function chooseProject(id: string): Promise<void> {
@@ -382,7 +418,14 @@ export function createFlow(deps: {
 
     const run = runId;
     const current = item;
+    const logId = draftLogId;
     set({ phase: "saving", message: null });
+    // Saved meanwhile in another frame (the chat card, the Work Status or the dialog): never twice.
+    if (logId && (await store.getSaved(logId).catch(() => null))) {
+      await pending?.clear(current.sessionId).catch(() => {});
+      if (run === runId) set({ phase: "done", message: TEXT.alreadySaved });
+      return;
+    }
     const date = now();
     const block = formatNoteBlock({ date, title, hours, summary: draft.summary.trim(), sessionTitle: current.sessionTitle });
 
@@ -419,12 +462,13 @@ export function createFlow(deps: {
       taskId,
       lastMessageId,
       lastCreatedAt,
-      lastLogId: draftLogId,
+      lastLogId: logId,
       taskTitle,
       projectTitle,
       logs,
       directory: current.directory || null,
     };
+    if (logId) await store.setSaved(logId, { taskTitle, hours, at: date.getTime() }).catch(() => {});
     const bound = await store.setBinding(current.sessionId, binding).then(
       () => true,
       () => false,
@@ -456,6 +500,7 @@ export function createFlow(deps: {
       return () => listeners.delete(fn);
     },
     start,
+    startWithDraft,
     chooseProject,
     cancel,
     setTarget,

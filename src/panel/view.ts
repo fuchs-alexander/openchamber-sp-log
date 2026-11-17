@@ -108,6 +108,10 @@ export type FlowViewOptions = {
   onRender?: () => void;
   /** Tighter spacing for the Work Status. */
   compact?: boolean;
+  /** The save button's label; default „Speichern“. */
+  saveLabel?: string;
+  /** Without „Abbrechen“ (the chat card has nothing to close). */
+  hideCancel?: boolean;
 };
 
 /**
@@ -168,8 +172,9 @@ export function renderFlow(root: HTMLElement, flow: Flow, opts: FlowViewOptions)
 
     save.hidden = !editing;
     save.disabled = s.phase !== "ready";
-    save.textContent = s.phase === "saving" ? "Wird gespeichert …" : "Speichern";
+    save.textContent = s.phase === "saving" ? "Wird gespeichert …" : (opts.saveLabel ?? "Speichern");
     cancel.textContent = s.phase === "done" ? "Schließen" : "Abbrechen";
+    cancel.hidden = opts.hideCancel === true;
     opts.onRender?.();
   }
 
