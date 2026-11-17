@@ -1,6 +1,6 @@
 {
   "name": "openchamber-sp-log",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -27,6 +27,15 @@
       "capabilities": ["model"],
       "service": { "entry": "dist/service/main.js", "runtime": "host", "keepRunning": true },
       "marks": true,
+      "blocks": [
+        {
+          "name": "SpLogDraft",
+          "description": "SP-Log-Entwurf als Karte: logId, Titel, Zusammenfassung, Stunden (Zahl als Text). Nur auf [SP-Log-Anfrage] antworten.",
+          "args": ["logId", "title", "summary", "hours"],
+          "entry": "dist/block/index.html",
+          "height": 160
+        }
+      ],
       "sessionEvents": { "events": ["turn-finished", "turn-failed"] },
       "sessionControl": { "content": true },
       "actions": [

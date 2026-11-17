@@ -1,4 +1,4 @@
-import { draftFromJson, SESSION_WORK_RULES, type Draft } from "./draft.ts";
+import { draftFromJson, parseHoursText, SESSION_WORK_RULES, type Draft } from "./draft.ts";
 
 /** How much of a logged message the prompt quotes to mark where the last log ended. */
 export const SINCE_HINT_MAX = 200;
@@ -23,8 +23,13 @@ export function buildSessionDraftPrompt(logId: string, sinceLogId: string | null
     "",
     SESSION_WORK_RULES,
     "",
-    "Antworte ausschließlich mit diesem JSON, ohne weiteren Text:",
-    `{"logId":${JSON.stringify(logId)},"titel":"…","zusammenfassung":"…","stunden":0}`,
+    "Antworte ausschließlich mit genau diesem Block, ohne weiteren Text, und ersetze die Platzhalter <Titel>, <Zusammenfassung> und <Stunden>:",
+    "```openui-lang",
+    "root = Stack([d])",
+    `d = SpLogDraft(${JSON.stringify(logId)}, "<Titel>", "<Zusammenfassung>", "<Stunden>")`,
+    "```",
+    "Alle Werte stehen in doppelten Anführungszeichen. Schreibe \" im Text als \\\" und Zeilenumbrüche als \\n.",
+    "Stunden als Dezimalzahl mit Punkt, z. B. \"1.5\".",
   ].join("\n");
 }
 
@@ -55,8 +60,82 @@ function objectSpans(text: string): string[] {
   return spans;
 }
 
-/** The draft from the JSON object carrying `logId`; null when no such object is in the text. */
+const BLOCK_CALL = /\bSpLogDraft\s*\(/g;
+const SIMPLE_ESCAPES: Record<string, string> = { '"': '"', "'": "'", "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
+
+/**
+ * The positional string arguments of a call whose `(` ends before `start`, up to its `)`.
+ * Strings in double (or single) quotes with JSON escapes; null when anything else appears.
+ */
+function callArgs(text: string, start: number): string[] | null {
+  const args: string[] = [];
+  let i = start;
+  const skipSpace = () => {
+    while (i < text.length && /\s/.test(text[i]!)) i++;
+  };
+  skipSpace();
+  if (text[i] === ")") return args;
+  for (;;) {
+    skipSpace();
+    const quote = text[i];
+    if (quote !== '"' && quote !== "'") return null;
+    i++;
+    let value = "";
+    for (;;) {
+      if (i >= text.length) return null;
+      const c = text[i]!;
+      if (c === quote) {
+        i++;
+        break;
+      }
+      if (c === "\\") {
+        const e = text[i + 1];
+        if (e === undefined) return null;
+        if (e === "u") {
+          const hex = text.slice(i + 2, i + 6);
+          if (!/^[0-9a-fA-F]{4}$/.test(hex)) return null;
+          value += String.fromCharCode(parseInt(hex, 16));
+          i += 6;
+          continue;
+        }
+        const mapped = SIMPLE_ESCAPES[e];
+        if (mapped === undefined) return null;
+        value += mapped;
+        i += 2;
+        continue;
+      }
+      value += c; // a raw newline is tolerated
+      i++;
+    }
+    args.push(value);
+    skipSpace();
+    if (text[i] === ",") {
+      i++;
+      continue;
+    }
+    if (text[i] === ")") return args;
+    return null;
+  }
+}
+
+/** The draft from the last well-formed `SpLogDraft(logId, title, summary, hours)` call for `logId`. */
+function blockDraft(text: string, logId: string): Draft | null {
+  let match: string[] | null = null;
+  for (const m of text.matchAll(BLOCK_CALL)) {
+    const args = callArgs(text, m.index + m[0].length);
+    if (args && args.length === 4 && args[0] === logId) match = args;
+  }
+  if (!match) return null;
+  return draftFromJson({ title: match[1], summary: match[2], hours: parseHoursText(match[3]!) });
+}
+
+/**
+ * The draft the session answered for `logId`: its `SpLogDraft` block, else (an older
+ * prompt) the JSON object carrying `logId`; null when neither is in the text.
+ */
 export function parseSessionDraft(text: string, logId: string): Draft | null {
+  const fromBlock = blockDraft(text, logId);
+  if (fromBlock) return fromBlock;
   let match: Record<string, unknown> | null = null;
   for (const span of objectSpans(text)) {
     try {

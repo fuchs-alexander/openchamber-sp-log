@@ -61,6 +61,16 @@ describe("service drafts", () => {
     });
   });
 
+  test("service: an SpLogDraft block reply with the logId completes the draft", async () => {
+    const { drafts, state } = setup({ status: "idle", reply: null });
+    await drafts.start({ sessionId: "S1", logId: "L1", prompt: "p" });
+    state.reply = '```openui-lang\nroot = Stack([d])\nd = SpLogDraft("L0", "T", "S", "1")\n```';
+    expect((await drafts.poll({ sessionId: "S1", logId: "L1" })).state).toBe("pending");
+    const block = '```openui-lang\nroot = Stack([d])\nd = SpLogDraft("L1", "T", "S", "1.5")\n```';
+    state.reply = block;
+    expect(await drafts.poll({ sessionId: "S1", logId: "L1" })).toEqual({ state: "done", text: block, sessionStatus: "idle" });
+  });
+
   test("service: busy stays pending", async () => {
     const { drafts } = setup({ status: "busy", reply: null });
     await drafts.start({ sessionId: "S1", logId: "L1", prompt: "p" });

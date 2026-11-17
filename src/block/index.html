@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SP-Log-Entwurf</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: transparent; color: var(--oc-fg); font-family: var(--oc-font, system-ui, sans-serif); font-size: 1rem; }
+  .card { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--oc-border); border-radius: var(--oc-radius, 8px); background: var(--oc-muted-surface, transparent); }
+  .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+  h2 { margin: 0; font-size: 1.05em; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+  .badge { flex: none; padding: 1px 8px; border-radius: 999px; font-size: 0.85em; white-space: nowrap; background: var(--oc-subtle, var(--oc-hover)); color: var(--oc-primary-text, var(--oc-fg)); }
+  .badge.unclear { color: var(--oc-warning-text, var(--oc-muted)); }
+  .summary { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
+  .summary:empty { display: none; }
+  .footer { margin: 0; color: var(--oc-muted); font-size: 0.82em; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="./main.js"></script>
+</body>
+</html>
