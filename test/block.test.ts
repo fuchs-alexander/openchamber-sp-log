@@ -13,7 +13,7 @@ describe("manifest", () => {
     expect(b.args).toEqual(["logId", "title", "summary", "hours"]);
     expect(b.entry).toBe("dist/block/index.html");
     expect((b.description as string).length).toBeLessThanOrEqual(120);
-    expect(pkg.version).toBe("0.7.0");
+    expect(pkg.version).toBe("0.7.1");
   });
 });
 
@@ -25,7 +25,9 @@ describe("parseHoursText", () => {
     expect(parseHoursText("2h")).toBeNull();
     expect(parseHoursText("")).toBeNull();
     expect(parseHoursText("-1")).toBeNull();
-    expect(parseHoursText("25")).toBeNull();
+    expect(parseHoursText("25")).toBe(25);
+    expect(parseHoursText("100")).toBe(100);
+    expect(parseHoursText("100.5")).toBeNull();
     expect(parseHoursText("1e1")).toBeNull();
   });
 });

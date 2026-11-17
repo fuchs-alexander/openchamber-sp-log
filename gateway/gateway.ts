@@ -17,7 +17,7 @@ export type GatewayOptions = {
 export const MAX_BODY_BYTES = 65536;
 export const MAX_TITLE_LENGTH = 200;
 export const EXCERPT_LENGTH = 300;
-export const MAX_HOURS = 24;
+export const MAX_HOURS = 100;
 const UPSTREAM_TIMEOUT_MS = 10_000;
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -97,7 +97,7 @@ function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-// Optional `hours`: absent, null or 0 → no booking; otherwise 0 < hours ≤ 24.
+// Optional `hours`: absent, null or 0 → no booking; otherwise 0 < hours ≤ 100.
 function checkHours(value: unknown): number {
   if (value === undefined || value === null) return 0;
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > MAX_HOURS) fail(400, "invalid-hours");
@@ -186,24 +186,45 @@ export function createGateway(opts: GatewayOptions): (req: Request) => Promise<R
 
   // SP caps tracked time at 24h per task and day, but not across tasks. So
   // each log becomes its own done subtask carrying the log's time; the parent
-  // shows the sum of its subtasks.
+  // shows the sum of its subtasks. A log over 24h is split into several
+  // subtasks "(i/n)" of 24h each, the remainder last, all on the same day.
+  // The first carries the log's notes, the others a short "Teil i/n". A
+  // failed chunk stops the split; booked chunks stay and are reported.
   async function logAsSubtask(id: string, hours: number, logTitle: string, notes: string): Promise<Record<string, unknown>> {
     if (hours <= 0) return { id };
     const today = now();
-    const title = `${dayMonth(today)} · ${logTitle}`;
-    const created = await trySp("POST", "/tasks", { parentId: id, title, notes, isDone: true });
-    const subtaskId = created.ok ? asRecord(created.data).id : undefined;
-    if (typeof subtaskId !== "string" || !ID_PATTERN.test(subtaskId)) {
-      const timeError = !created.ok && created.error === "sp-unreachable" ? "sp-unreachable" : "sp-subtask-rejected";
-      return { id, timeBooked: false, timeError };
+    const total = Math.max(1, Math.round(hours * 3_600_000));
+    const chunks: number[] = [];
+    for (let left = total; left > 0; left -= DAY_MS) chunks.push(Math.min(DAY_MS, left));
+    const n = chunks.length;
+    const ids: string[] = [];
+    let bookedMs = 0;
+    const result = (extra: Record<string, unknown>): Record<string, unknown> => ({
+      id,
+      ...(ids.length > 0 ? { subtaskId: ids[0] } : {}),
+      ...(n > 1 ? { subtaskIds: [...ids] } : {}),
+      ...extra,
+      ...(n > 1 && extra.timeBooked === false ? { bookedHours: bookedMs / 3_600_000 } : {}),
+    });
+    for (const [i, duration] of chunks.entries()) {
+      const suffix = n > 1 ? ` (${i + 1}/${n})` : "";
+      const title = `${dayMonth(today)} · ${logTitle}${suffix}`;
+      const body = i === 0 ? notes : `Teil ${i + 1}/${n}`;
+      const created = await trySp("POST", "/tasks", { parentId: id, title, notes: body, isDone: true });
+      const subtaskId = created.ok ? asRecord(created.data).id : undefined;
+      if (typeof subtaskId !== "string" || !ID_PATTERN.test(subtaskId)) {
+        const timeError = !created.ok && created.error === "sp-unreachable" ? "sp-unreachable" : "sp-subtask-rejected";
+        return result({ timeBooked: false, timeError });
+      }
+      ids.push(subtaskId);
+      const booked = await trySp("POST", `/tasks/${subtaskId}/time`, { date: localDate(today), duration });
+      if (!booked.ok) {
+        const timeError = booked.error === "sp-unreachable" ? "sp-unreachable" : "sp-time-rejected";
+        return result({ timeBooked: false, timeError });
+      }
+      bookedMs += duration;
     }
-    const duration = Math.max(1, Math.round(hours * 3_600_000));
-    const booked = await trySp("POST", `/tasks/${subtaskId}/time`, { date: localDate(today), duration });
-    if (!booked.ok) {
-      const timeError = booked.error === "sp-unreachable" ? "sp-unreachable" : "sp-time-rejected";
-      return { id, subtaskId, timeBooked: false, timeError };
-    }
-    return { id, subtaskId, timeBooked: true };
+    return result({ timeBooked: true });
   }
 
   // A logged task is finished: the parent is marked done last, after its log

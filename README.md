@@ -23,7 +23,7 @@ EOF
 
 Das Gateway lauscht nur auf `127.0.0.1:3877`; ohne Token liefert `https://dev-sp.nomobo.de/me` 401.
 
-Zeitbuchung (ab 0.5.0): Jeder Log mit Stunden wird als erledigte Unteraufgabe „TT.MM. · Titel“ unter der Aufgabe angelegt und trägt die Zeit; die Aufgabe zeigt die Summe. So greift SPs Grenze von 24 h pro Aufgabe und Tag nicht für die Summe mehrerer Logs. Hat eine Aufgabe noch eigene Zeit ohne Unteraufgaben (Logs vor 0.5.0), zieht das Gateway diese zuerst in eine Unteraufgabe „Frühere Logs“ um.
+Zeitbuchung (ab 0.5.0): Jeder Log mit Stunden wird als erledigte Unteraufgabe „TT.MM. · Titel“ unter der Aufgabe angelegt und trägt die Zeit; die Aufgabe zeigt die Summe. So greift SPs Grenze von 24 h pro Aufgabe und Tag nicht für die Summe mehrerer Logs. Ein einzelner Log darf bis 100 h haben (ab 0.7.1); über 24 h legt das Gateway mehrere Unteraufgaben „TT.MM. · Titel (i/n)“ zu je 24 h an, den Rest zuletzt. Hat eine Aufgabe noch eigene Zeit ohne Unteraufgaben (Logs vor 0.5.0), zieht das Gateway diese zuerst in eine Unteraufgabe „Frühere Logs“ um.
 
 Erledigen (ab 0.6.0): Nach jedem gespeicherten Log markiert das Gateway die Aufgabe als erledigt (Antwortfeld `completed`). Weitere Logs derselben Session hängen weiter an die gebundene Aufgabe an, auch wenn sie erledigt ist; das Panel prüft sie über `GET /tasks/:id` und zeigt sie als „Titel (erledigt)“. Erst eine gelöschte oder archivierte Aufgabe gilt als weg, dann wird eine neue angelegt.
 Entwicklung: `bun run check` führt Typecheck, Build und Tests aus.

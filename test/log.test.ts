@@ -24,7 +24,7 @@ describe("parseDraft", () => {
   });
 
   test("invalid hours → null", () => {
-    for (const h of ["-1", "25", '"2"', "null"]) {
+    for (const h of ["-1", "101", '"2"', "null"]) {
       expect(parseDraft(`{"title":"X","summary":"S","hours":${h}}`).hours).toBeNull();
     }
     expect(parseDraft('{"title":"X","summary":"S","hours":NaN}').hours).toBeNull();
@@ -51,9 +51,12 @@ describe("parseDraft", () => {
     expect(d.hours).toBe(1);
   });
 
-  test("accepts boundaries 0 and 24", () => {
+  test("accepts boundaries 0 and 100, rejects above 100", () => {
     expect(parseDraft('{"title":"X","summary":"S","hours":0}').hours).toBe(0);
     expect(parseDraft('{"title":"X","summary":"S","hours":24}').hours).toBe(24);
+    expect(parseDraft('{"title":"X","summary":"S","hours":30}').hours).toBe(30);
+    expect(parseDraft('{"title":"X","summary":"S","hours":100}').hours).toBe(100);
+    expect(parseDraft('{"title":"X","summary":"S","hours":100.01}').hours).toBeNull();
   });
 });
 

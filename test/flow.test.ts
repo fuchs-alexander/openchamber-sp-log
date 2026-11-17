@@ -776,6 +776,21 @@ describe("flow: binding details", () => {
     });
   });
 
+  test("save accepts more than 24h up to 100h, refuses above", async () => {
+    const big = setup();
+    await big.flow.start(big.item);
+    big.flow.edit({ hours: 30 });
+    await big.flow.save();
+    expect(big.calls.setBinding[0]!.b).toMatchObject({ logs: [{ at: AT, hours: 30 }] });
+
+    const over = setup();
+    await over.flow.start(over.item);
+    over.flow.edit({ hours: 100.5 });
+    await over.flow.save();
+    expect(over.calls.setBinding).toHaveLength(0);
+    expect(over.flow.state.message).toBe("Bitte die Stunden (0 bis 100) eingeben.");
+  });
+
   test("save to an existing task appends to the logs of the binding", async () => {
     const { flow, calls, item } = setup({
       binding: {

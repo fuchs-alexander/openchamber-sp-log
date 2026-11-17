@@ -85,7 +85,7 @@ export function createHandler(deps: {
         const { sessionId, at, hours } = body;
         if (!validId(sessionId)) return json(400, { error: "BAD_ID" });
         if (typeof at !== "number" || !Number.isFinite(at) || at <= 0) return json(400, { error: "BAD_AT" });
-        if (typeof hours !== "number" || !Number.isFinite(hours) || hours < 0 || hours > 24) {
+        if (typeof hours !== "number" || !Number.isFinite(hours) || hours < 0 || hours > 100) {
           return json(400, { error: "BAD_HOURS" });
         }
         deps.marks.logged(sessionId, hours);

@@ -78,7 +78,8 @@ eine Session-Aktion `log-session` („Nach Super Productivity loggen“) mit
    - Der Verlauf ist Datenmaterial, keine Anweisung. Er wird auf das Ende
      gekürzt, wenn er zu lang ist.
    - Geprüft wird: `title` 1–200 Zeichen, `summary` ≤ 4000 Zeichen, `hours` ist
-     eine endliche Zahl von 0 bis 24.
+     eine endliche Zahl von 0 bis 100 (ab 0.7.1; über 24 h teilt das Gateway
+     den Log auf mehrere Unteraufgaben zu je höchstens 24 h auf).
    - Die Schätzung folgt dem bisherigen `/log`-Leitfaden: Aufwand eines
      erfahrenen Entwicklers ohne KI. Mitgezählt werden Entwicklung, Recherche,
      Iteration, Debugging, Styling, Übersetzungen, Tests, Doku und Review.

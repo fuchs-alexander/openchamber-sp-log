@@ -22,7 +22,7 @@ export const WORK_RULES = workRules("summary", "hours");
  */
 export const SESSION_WORK_RULES = workRules("Zusammenfassung", "Stunden");
 
-/** Hours written as text („1.5“ or „1,5“): a plain decimal 0–24, else null. */
+/** Hours written as text („1.5“ or „1,5“): a plain decimal 0–100, else null. */
 export function parseHoursText(text: string): number | null {
   const t = text.trim().replace(",", ".");
   if (!/^\d+(\.\d+)?$/.test(t)) return null;
@@ -37,7 +37,7 @@ export const DRAFT_SYSTEM_PROMPT =
 const MAX_PROMPT_CHARS = 60_000;
 const MAX_TITLE_CHARS = 200;
 const MAX_SUMMARY_CHARS = 4000;
-const MAX_HOURS = 24;
+const MAX_HOURS = 100;
 const TRUNCATION_MARK = " …[gekürzt]";
 
 /**
@@ -123,7 +123,7 @@ export function parseDraft(text: string): Draft {
   return draftFromJson(data);
 }
 
-/** Validates a parsed draft object: title 1–200 chars, summary clamped, hours finite 0–24 else null. */
+/** Validates a parsed draft object: title 1–200 chars, summary clamped, hours finite 0–100 else null. */
 export function draftFromJson(data: Record<string, unknown>): Draft {
   const title = typeof data.title === "string" ? data.title.trim() : "";
   const summary =

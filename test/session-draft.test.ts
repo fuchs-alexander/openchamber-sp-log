@@ -108,7 +108,8 @@ describe("parseSessionDraft: SpLogDraft block", () => {
 
   test("invalid hours keep the draft with hours null", () => {
     expect(parseSessionDraft('SpLogDraft("L1", "T", "S", "viel")', "L1")).toEqual({ title: "T", summary: "S", hours: null });
-    expect(parseSessionDraft('SpLogDraft("L1", "T", "S", "99")', "L1")).toEqual({ title: "T", summary: "S", hours: null });
+    expect(parseSessionDraft('SpLogDraft("L1", "T", "S", "101")', "L1")).toEqual({ title: "T", summary: "S", hours: null });
+    expect(parseSessionDraft('SpLogDraft("L1", "T", "S", "36")', "L1")).toEqual({ title: "T", summary: "S", hours: 36 });
   });
 
   test("single quotes are accepted", () => {
@@ -145,7 +146,7 @@ describe("parseSessionDraft: JSON fallback", () => {
   });
 
   test("German keys: invalid stunden and wrong logId", () => {
-    expect(parseSessionDraft('{"logId":"L1","titel":"X","zusammenfassung":"S","stunden":99}', "L1")).toEqual({
+    expect(parseSessionDraft('{"logId":"L1","titel":"X","zusammenfassung":"S","stunden":101}', "L1")).toEqual({
       title: "X",
       summary: "S",
       hours: null,
@@ -176,7 +177,7 @@ describe("parseSessionDraft: JSON fallback", () => {
   });
 
   test("invalid hours", () => {
-    expect(parseSessionDraft('{"logId":"L1","title":"X","summary":"S","hours":99}', "L1")).toEqual({
+    expect(parseSessionDraft('{"logId":"L1","title":"X","summary":"S","hours":101}', "L1")).toEqual({
       title: "X",
       summary: "S",
       hours: null,

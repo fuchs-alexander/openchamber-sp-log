@@ -481,7 +481,7 @@ describe("gateway", () => {
     });
 
     test("invalid hours → 400 before anything is written", async () => {
-      for (const hours of [-1, 24.01, "2", Number.NaN, true, [1], {}]) {
+      for (const hours of [-1, 100.01, "2", Number.NaN, true, [1], {}]) {
         const sp = spModel();
         sp.seed({ id: "T", title: "t", notes: "", projectId: "A" });
         const { handle } = gwt(sp);
@@ -495,11 +495,101 @@ describe("gateway", () => {
       }
     });
 
-    test("hours 24 is allowed", async () => {
+    test("hours 24 → one subtask without suffix", async () => {
       const { sp, handle } = gwt(spModel());
-      const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours: 24 }));
+      const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours: 24, logTitle: "Groß" }));
       expect(await res.json()).toEqual({ id: "N1", subtaskId: "N2", timeBooked: true, completed: true });
+      expect(sp.calls[1]!.body).toEqual({ parentId: "N1", title: "17.11. · Groß", notes: "", isDone: true });
       expect(sp.calls[2]!.body).toEqual({ date: "2026-11-17", duration: 86_400_000 });
+    });
+
+    const chunked: Array<[number, number[]]> = [
+      [30, [24, 6]],
+      [48, [24, 24]],
+      [100, [24, 24, 24, 24, 4]],
+    ];
+    for (const [hours, parts] of chunked) {
+      test(`hours ${hours} → ${parts.length} subtasks (${parts.join("+")}h) on the same day`, async () => {
+        const sp = spModel();
+        sp.seed({ id: "T", title: "t", notes: "alt", projectId: "A" });
+        const { handle } = gwt(sp);
+        const res = await handle(req("POST", "/tasks/T/append", { text: "block", hours, logTitle: "Riesig" }));
+        expect(res.status).toBe(200);
+        const ids = parts.map((_, i) => `N${i + 1}`);
+        expect(await res.json()).toEqual({ id: "T", subtaskId: "N1", subtaskIds: ids, timeBooked: true, completed: true });
+        expect(sp.get("T")!.subTaskIds).toEqual(ids);
+        const n = parts.length;
+        ids.forEach((id, i) => {
+          const sub = sp.get(id)!;
+          expect(sub.title).toBe(`17.11. · Riesig (${i + 1}/${n})`);
+          expect(sub.notes).toBe(i === 0 ? "block" : `Teil ${i + 1}/${n}`);
+          expect(sub.isDone).toBe(true);
+          expect(sp.day(id, "2026-11-17")).toBe(parts[i]! * H);
+        });
+        const durations = sp.calls.filter((c) => c.path.endsWith("/time")).map((c) => (c.body as { duration: number }).duration);
+        expect(durations).toEqual(parts.map((p) => p * H));
+        expect(sp.total("T")).toBe(hours * H);
+        expect(sp.day("T", "2026-11-17")).toBe(hours * H);
+        expect(sp.get("T")!.isDone).toBe(true);
+      });
+    }
+
+    test("fractional large hours: chunk durations are integers summing to the rounded total", async () => {
+      const { sp, handle } = gwt(spModel());
+      const hours = 50 + 1 / 3;
+      await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours }));
+      const durations = sp.calls.filter((c) => c.path.endsWith("/time")).map((c) => (c.body as { duration: number }).duration);
+      expect(durations).toEqual([24 * H, 24 * H, Math.round(hours * H) - 48 * H]);
+      expect(durations.every(Number.isInteger)).toBe(true);
+      expect(durations.reduce((s, d) => s + d, 0)).toBe(Math.round(hours * H));
+    });
+
+    test("hours above 100 → 400 invalid-hours", async () => {
+      for (const hours of [100.01, 101, 1000]) {
+        const sp = spModel();
+        sp.seed({ id: "T", title: "t", notes: "", projectId: "A" });
+        const { handle } = gwt(sp);
+        const c = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours }));
+        expect(c.status).toBe(400);
+        expect(await c.json()).toEqual({ error: "invalid-hours" });
+        const a = await handle(req("POST", "/tasks/T/append", { text: "neu", hours }));
+        expect(a.status).toBe(400);
+        expect(sp.calls).toHaveLength(0);
+      }
+    });
+
+    test("chunk fails → timeBooked false, booked hours reported, nothing rolled back", async () => {
+      const sp = spModel({ failTimeAfter: 2 });
+      const { handle } = gwt(sp);
+      const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "b", hours: 60, logTitle: "Viel" }));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        id: "N1",
+        subtaskId: "N2",
+        subtaskIds: ["N2", "N3", "N4"],
+        timeBooked: false,
+        timeError: "sp-time-rejected",
+        bookedHours: 48,
+        completed: true,
+      });
+      expect(sp.total("N1")).toBe(48 * H);
+      expect(sp.get("N1")!.subTaskIds).toEqual(["N2", "N3", "N4"]);
+    });
+
+    test("chunk subtask rejected → stops, reports booked hours", async () => {
+      const sp = spModel({ failSubtaskAfter: 1 });
+      const { handle } = gwt(sp);
+      const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "b", hours: 30, logTitle: "Viel" }));
+      expect(await res.json()).toEqual({
+        id: "N1",
+        subtaskId: "N2",
+        subtaskIds: ["N2"],
+        timeBooked: false,
+        timeError: "sp-subtask-rejected",
+        bookedHours: 24,
+        completed: true,
+      });
+      expect(sp.total("N1")).toBe(24 * H);
     });
 
     test("rejected booking → 200 with timeBooked false", async () => {
@@ -573,7 +663,11 @@ type FakeTask = {
 };
 type SpModel = ReturnType<typeof spModel>;
 
-function spModel(opts: { inherit?: boolean; failTime?: boolean; failSubtask?: boolean; throwOnTime?: boolean; failCreate?: boolean } = {}) {
+function spModel(
+  opts: { inherit?: boolean; failTime?: boolean; failSubtask?: boolean; throwOnTime?: boolean; failCreate?: boolean; failTimeAfter?: number; failSubtaskAfter?: number } = {},
+) {
+  let subtasksMade = 0;
+  let timesBooked = 0;
   const inherit = opts.inherit ?? true;
   const tasks = new Map<string, FakeTask>();
   const calls: Call[] = [];
@@ -626,6 +720,8 @@ function spModel(opts: { inherit?: boolean; failTime?: boolean; failSubtask?: bo
       const b = body ?? {};
       if (typeof b.parentId === "string") {
         if (opts.failSubtask) return bad("nope");
+        if (opts.failSubtaskAfter !== undefined && subtasksMade >= opts.failSubtaskAfter) return bad("nope");
+        subtasksMade++;
         if ("projectId" in b || "tagIds" in b) return bad("subtask with projectId");
         const parent = tasks.get(b.parentId);
         if (!parent) return json({ ok: false }, 404);
@@ -653,12 +749,14 @@ function spModel(opts: { inherit?: boolean; failTime?: boolean; failSubtask?: bo
     if (m[2] && method === "POST") {
       if (opts.throwOnTime) throw new Error(`boom Bearer ${SP_TOKEN}`);
       if (opts.failTime) return bad("rejected");
+      if (opts.failTimeAfter !== undefined && timesBooked >= opts.failTimeAfter) return bad("rejected");
       const date = body?.date as string;
       const duration = body?.duration as number;
       if (!Number.isInteger(duration) || duration < 1 || duration > DAY) return bad("duration");
       if (t.subTaskIds.length > 0) return bad("Task has subtasks");
       if ((t.own[date] ?? 0) + duration > DAY) return bad("Time spent on one day cannot exceed 24h");
       t.own[date] = (t.own[date] ?? 0) + duration;
+      timesBooked++;
       return json({ ok: true, data: view(t) });
     }
     return json({ ok: false }, 404);

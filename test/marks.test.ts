@@ -268,7 +268,7 @@ describe("service http: marks", () => {
     await book.start();
     expect((await handler(post("/logged", { sessionId: "s 1", at: 1, hours: 1 }))).status).toBe(400);
     expect((await handler(post("/logged", { sessionId: "s1", at: "x", hours: 1 }))).status).toBe(400);
-    expect((await handler(post("/logged", { sessionId: "s1", at: 1, hours: 25 }))).status).toBe(400);
+    expect((await handler(post("/logged", { sessionId: "s1", at: 1, hours: 100.5 }))).status).toBe(400);
     expect((await handler(post("/logged", "{nope"))).status).toBe(400);
     expect(emitted).toEqual([]);
 
@@ -278,6 +278,12 @@ describe("service http: marks", () => {
     await book.flush();
     expect(markOf("s1")).toMatchObject({ tone: "success", text: "SP: 1 Log · ≈ 1,5 h" });
     expect(emitted).toEqual([{ topic: "logged", data: { sessionId: "s1" } }]);
+  });
+
+  test("logged: accepts up to 100 hours", async () => {
+    const { handler, book, clock } = http();
+    await book.start();
+    expect((await handler(post("/logged", { sessionId: "s2", at: clock.t, hours: 100 }))).status).toBe(200);
   });
 
   test("draft: a started request is remembered as pending", async () => {

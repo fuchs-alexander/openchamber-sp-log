@@ -51,7 +51,7 @@ const TEXT = {
   staleBinding: "Die zuletzt verknüpfte Aufgabe ist nicht mehr offen. Es wird eine neue Aufgabe angelegt.",
   taskGone: "Die Aufgabe existiert nicht mehr oder ist archiviert. Bitte „Neue Aufgabe“ wählen oder eine andere.",
   needTitle: "Bitte einen Titel (höchstens 200 Zeichen) eingeben.",
-  needHours: "Bitte die Stunden (0 bis 24) eingeben.",
+  needHours: "Bitte die Stunden (0 bis 100) eingeben.",
   saveFailed: "Speichern fehlgeschlagen. Der Entwurf bleibt erhalten – bitte erneut versuchen.",
   loadFailed: "Super Productivity ist gerade nicht erreichbar.",
   logged: "In Super Productivity geloggt",
@@ -414,7 +414,7 @@ export function createFlow(deps: {
     const title = draft.title.trim();
     if (!title || title.length > 200) return set({ message: TEXT.needTitle });
     const hours = draft.hours;
-    if (hours === null || !Number.isFinite(hours) || hours < 0 || hours > 24) return set({ message: TEXT.needHours });
+    if (hours === null || !Number.isFinite(hours) || hours < 0 || hours > 100) return set({ message: TEXT.needHours });
 
     const run = runId;
     const current = item;

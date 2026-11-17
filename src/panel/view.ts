@@ -129,7 +129,7 @@ export function renderFlow(root: HTMLElement, flow: Flow, opts: FlowViewOptions)
   const target = h("select");
   const title = h("input", { type: "text", maxLength: 200, autocomplete: "off" });
   const summary = h("textarea", { rows: opts.compact ? 4 : 6, maxLength: 4000 });
-  const hours = h("input", { type: "number", step: "0.25", min: "0", max: "24", inputMode: "decimal" });
+  const hours = h("input", { type: "number", step: "0.25", min: "0", max: "100", inputMode: "decimal" });
   const editor = h(
     "div",
     { className: "editor" },
