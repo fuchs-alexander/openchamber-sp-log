@@ -27,7 +27,7 @@
       "capabilities": ["model"],
       "service": { "entry": "dist/service/main.js", "runtime": "host", "keepRunning": true },
       "marks": true,
-      "sessionEvents": { "events": ["turn-finished"] },
+      "sessionEvents": { "events": ["turn-finished", "turn-failed"] },
       "sessionControl": { "content": true },
       "actions": [
         { "id": "log-session", "label": "Nach Super Productivity loggen", "where": "session", "payload": ["messages"], "mode": "open" }

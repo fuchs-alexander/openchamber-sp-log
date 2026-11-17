@@ -363,6 +363,8 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 var MARK_RATE_MAX = SERVICE_MARK_RATE_MAX;
 var RATE_WINDOW_MS = 60000;
+var PENDING_TTL_MS = DRAFT_TTL_MS;
+var MARK_RETRY_DELAYS_MS = [5000, 30000, 120000];
 var pad = (n) => String(n).padStart(2, "0");
 var formatHours = (hours) => String(Math.round(hours * 100) / 100).replace(".", ",");
 function markFor(s) {
@@ -379,14 +381,32 @@ function markFor(s) {
     text: `SP: ${s.logs} ${s.logs === 1 ? "Log" : "Logs"} · ≈ ${formatHours(s.hours)} h`
   };
 }
-var empty = () => ({ loggedAt: null, logs: 0, hours: 0, lastTurnAt: null, pendingLogId: null });
+var empty = () => ({
+  loggedAt: null,
+  logs: 0,
+  hours: 0,
+  lastTurnAt: null,
+  pendingLogId: null,
+  pendingSince: null
+});
 var activity = (s) => Math.max(s.loggedAt ?? 0, s.lastTurnAt ?? 0);
-function isMarkState(value) {
+var numOrNull = (v) => v === null || typeof v === "number" && Number.isFinite(v);
+function readMarkState(value) {
   if (!value || typeof value !== "object")
-    return false;
+    return null;
   const s = value;
-  const numOrNull = (v) => v === null || typeof v === "number" && Number.isFinite(v);
-  return numOrNull(s.loggedAt) && numOrNull(s.lastTurnAt) && typeof s.logs === "number" && typeof s.hours === "number" && (s.pendingLogId === null || typeof s.pendingLogId === "string");
+  if (!numOrNull(s.loggedAt) || !numOrNull(s.lastTurnAt) || typeof s.logs !== "number" || typeof s.hours !== "number" || !(s.pendingLogId === null || typeof s.pendingLogId === "string")) {
+    return null;
+  }
+  const pendingSince = typeof s.pendingSince === "number" && Number.isFinite(s.pendingSince) ? s.pendingSince : null;
+  return {
+    loggedAt: s.loggedAt,
+    logs: s.logs,
+    hours: s.hours,
+    lastTurnAt: s.lastTurnAt,
+    pendingLogId: pendingSince === null ? null : s.pendingLogId,
+    pendingSince: s.pendingLogId === null ? null : pendingSince
+  };
 }
 function fileStateStore(dir) {
   const file = join(dir, "state.json");
@@ -397,9 +417,11 @@ function fileStateStore(dir) {
         if (!raw || typeof raw !== "object")
           return {};
         const out = {};
-        for (const [id, s] of Object.entries(raw))
-          if (isMarkState(s))
+        for (const [id, value] of Object.entries(raw)) {
+          const s = readMarkState(value);
+          if (s)
             out[id] = s;
+        }
         return out;
       } catch {
         return {};
@@ -412,9 +434,22 @@ function fileStateStore(dir) {
     }
   };
 }
+function memoryStateStore() {
+  let state = {};
+  return {
+    load: async () => structuredClone(state),
+    save: async (next) => {
+      state = structuredClone(next);
+    }
+  };
+}
 function createMarkBook(deps) {
   const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const warn = deps.warn ?? ((message) => console.warn(message));
   let states = {};
+  let early = [];
+  const failures = new Map;
+  const retries = new Set;
   const shown = new Map;
   const queue = new Set;
   const sentAt = [];
@@ -442,12 +477,31 @@ function createMarkBook(deps) {
       sentAt.push(deps.now());
       try {
         await deps.setMark({ sessionId: id }, mark);
+        failures.delete(id);
         if (mark)
           shown.set(id, key);
         else
           shown.delete(id);
-      } catch {}
+      } catch {
+        retryLater(id);
+      }
     }
+  }
+  function retryLater(id) {
+    const attempt = failures.get(id) ?? 0;
+    const delay = MARK_RETRY_DELAYS_MS[attempt];
+    failures.set(id, attempt + 1);
+    if (delay === undefined) {
+      warn("sp-log: a sidebar mark was refused; giving up until the session changes");
+      return;
+    }
+    if (attempt === 0)
+      warn("sp-log: a sidebar mark was refused; retrying");
+    const retry = sleep(delay).then(() => {
+      retries.delete(retry);
+      apply(id);
+    });
+    retries.add(retry);
   }
   function apply(id) {
     const wasIdle = queue.size === 0;
@@ -470,6 +524,11 @@ function createMarkBook(deps) {
     }
   }
   function update(id, change) {
+    if (early) {
+      early.push(() => update(id, change));
+      return;
+    }
+    failures.delete(id);
     const s = states[id] ?? empty();
     change(s);
     states[id] = s;
@@ -477,39 +536,68 @@ function createMarkBook(deps) {
     persist();
     apply(id);
   }
+  const clearPending = (s) => {
+    s.pendingLogId = null;
+    s.pendingSince = null;
+  };
+  function turnEnded(id) {
+    update(id, (s) => {
+      const ownTurn = s.pendingLogId !== null && deps.now() - (s.pendingSince ?? 0) <= PENDING_TTL_MS;
+      clearPending(s);
+      if (!ownTurn)
+        s.lastTurnAt = deps.now();
+    });
+  }
   return {
     async start() {
+      if (!early)
+        return;
       states = await deps.store.load();
+      const waiting = early;
+      early = null;
       for (const id of Object.keys(states))
         apply(id);
+      for (const change of waiting)
+        change();
     },
-    turnFinished(id) {
-      update(id, (s) => {
-        if (s.pendingLogId !== null)
-          s.pendingLogId = null;
-        else
-          s.lastTurnAt = deps.now();
-      });
-    },
+    turnFinished: turnEnded,
+    turnFailed: turnEnded,
     pending(id, logId) {
       update(id, (s) => {
         s.pendingLogId = logId;
+        s.pendingSince = deps.now();
       });
     },
-    logged(id, at, hours) {
+    cancelPending(id, logId) {
+      if (!early && !states[id])
+        return;
       update(id, (s) => {
-        s.loggedAt = Math.max(at, s.lastTurnAt ?? at);
+        if (s.pendingLogId === logId)
+          clearPending(s);
+      });
+    },
+    logged(id, hours) {
+      update(id, (s) => {
+        const now = deps.now();
+        s.loggedAt = Math.max(now, s.lastTurnAt ?? now);
         s.logs += 1;
         s.hours += hours;
-        s.pendingLogId = null;
+        clearPending(s);
       });
     },
     state(id) {
       return states[id] ? { ...states[id] } : null;
     },
     async flush() {
-      await draining;
-      await saving;
+      for (;; ) {
+        const [d, s] = [draining, saving];
+        await d;
+        await s;
+        if (retries.size > 0)
+          await Promise.all(retries);
+        else if (d === draining && s === saving && queue.size === 0)
+          return;
+      }
     }
   };
 }
@@ -557,8 +645,13 @@ function createHandler(deps) {
         if (typeof prompt !== "string" || prompt.length === 0 || prompt.length > PROMPT_MAX) {
           return json(400, { error: "BAD_PROMPT" });
         }
-        await deps.drafts.start({ sessionId, logId, prompt });
         deps.marks.pending(sessionId, logId);
+        try {
+          await deps.drafts.start({ sessionId, logId, prompt });
+        } catch (error) {
+          deps.marks.cancelPending(sessionId, logId);
+          throw error;
+        }
         return json(200, { started: true });
       }
       if (url.pathname === "/logged" && req.method === "POST") {
@@ -573,7 +666,7 @@ function createHandler(deps) {
         if (typeof hours !== "number" || !Number.isFinite(hours) || hours < 0 || hours > 24) {
           return json(400, { error: "BAD_HOURS" });
         }
-        deps.marks.logged(sessionId, at, hours);
+        deps.marks.logged(sessionId, hours);
         deps.emit("logged", { sessionId }).catch(() => {});
         return json(200, { ok: true });
       }
@@ -582,8 +675,12 @@ function createHandler(deps) {
         if (!request)
           return json(400, { ok: false, error: "not a session event" });
         const { type, session } = request.event;
-        if (type === "turn-finished" && session.parentId === null)
-          deps.marks.turnFinished(session.id);
+        if (session.parentId === null) {
+          if (type === "turn-finished")
+            deps.marks.turnFinished(session.id);
+          else if (type === "turn-failed")
+            deps.marks.turnFailed(session.id);
+        }
         return json(200, { ok: true });
       }
       if (url.pathname === "/draft" && req.method === "GET") {
@@ -605,7 +702,13 @@ function createHandler(deps) {
     }
   };
 }
-function serve(port, token) {
+function stateStoreFor(dataDir, warn) {
+  if (dataDir)
+    return fileStateStore(dataDir);
+  warn("sp-log: no service data folder; sidebar mark state is kept in memory only");
+  return memoryStateStore();
+}
+async function serve(port, token) {
   const host = createServiceHost({ env: process.env });
   const drafts = createDrafts({
     sessions: {
@@ -615,13 +718,12 @@ function serve(port, token) {
     },
     now: () => Date.now()
   });
-  const dataDir = process.env[OPENCHAMBER_SERVICE_DATA_DIR] ?? ".";
   const marks = createMarkBook({
-    store: fileStateStore(dataDir),
+    store: stateStoreFor(process.env[OPENCHAMBER_SERVICE_DATA_DIR], (message) => console.warn(message)),
     setMark: (target, mark) => host.setMark(target, mark),
     now: () => Date.now()
   });
-  marks.start();
+  await marks.start();
   const handler = createHandler({ token, drafts, marks, emit: (topic, data) => host.emit(topic, data) });
   const server = createServer(async (incoming, outgoing) => {
     try {
@@ -654,8 +756,9 @@ function serve(port, token) {
 var port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 var token = process.env.OPENCHAMBER_SERVICE_TOKEN;
 if (Number.isInteger(port) && port > 0 && token)
-  serve(port, token);
+  await serve(port, token);
 export {
   PROMPT_MAX,
-  createHandler
+  createHandler,
+  stateStoreFor
 };

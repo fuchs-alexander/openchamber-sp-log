@@ -14,7 +14,7 @@ import {
   type JsonValue,
 } from "@openchamber/sdk";
 import { createDrafts, HostTimeoutError, SessionWaitingError, type Drafts } from "./drafts.ts";
-import { createMarkBook, fileStateStore, type MarkBook } from "./marks.ts";
+import { createMarkBook, fileStateStore, memoryStateStore, type MarkBook, type StateStore } from "./marks.ts";
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 export const PROMPT_MAX = 8000;
@@ -68,20 +68,27 @@ export function createHandler(deps: {
         if (typeof prompt !== "string" || prompt.length === 0 || prompt.length > PROMPT_MAX) {
           return json(400, { error: "BAD_PROMPT" });
         }
-        await deps.drafts.start({ sessionId, logId, prompt });
+        // Pending first, so even a very fast turn of the request is not counted as work.
         deps.marks.pending(sessionId, logId);
+        try {
+          await deps.drafts.start({ sessionId, logId, prompt });
+        } catch (error) {
+          deps.marks.cancelPending(sessionId, logId);
+          throw error;
+        }
         return json(200, { started: true });
       }
       if (url.pathname === "/logged" && req.method === "POST") {
         const body = await readJson(req);
         if (!body) return json(400, { error: "BAD_JSON" });
+        // `at` is the panel's clock: checked, but the state uses the service's own.
         const { sessionId, at, hours } = body;
         if (!validId(sessionId)) return json(400, { error: "BAD_ID" });
         if (typeof at !== "number" || !Number.isFinite(at) || at <= 0) return json(400, { error: "BAD_AT" });
         if (typeof hours !== "number" || !Number.isFinite(hours) || hours < 0 || hours > 24) {
           return json(400, { error: "BAD_HOURS" });
         }
-        deps.marks.logged(sessionId, at, hours);
+        deps.marks.logged(sessionId, hours);
         void deps.emit("logged", { sessionId }).catch(() => {});
         return json(200, { ok: true });
       }
@@ -90,7 +97,10 @@ export function createHandler(deps: {
         if (!request) return json(400, { ok: false, error: "not a session event" });
         const { type, session } = request.event;
         // Subagents' turns belong to their parent's turn.
-        if (type === "turn-finished" && session.parentId === null) deps.marks.turnFinished(session.id);
+        if (session.parentId === null) {
+          if (type === "turn-finished") deps.marks.turnFinished(session.id);
+          else if (type === "turn-failed") deps.marks.turnFailed(session.id);
+        }
         return json(200, { ok: true });
       }
       if (url.pathname === "/draft" && req.method === "GET") {
@@ -109,7 +119,14 @@ export function createHandler(deps: {
   };
 }
 
-function serve(port: number, token: string): void {
+/** `state.json` in the service's data folder; without one, memory only (never the cwd). */
+export function stateStoreFor(dataDir: string | undefined, warn: (message: string) => void): StateStore {
+  if (dataDir) return fileStateStore(dataDir);
+  warn("sp-log: no service data folder; sidebar mark state is kept in memory only");
+  return memoryStateStore();
+}
+
+async function serve(port: number, token: string): Promise<void> {
   const host = createServiceHost({ env: process.env });
   const drafts = createDrafts({
     sessions: {
@@ -119,13 +136,13 @@ function serve(port: number, token: string): void {
     },
     now: () => Date.now(),
   });
-  const dataDir = process.env[OPENCHAMBER_SERVICE_DATA_DIR] ?? ".";
   const marks = createMarkBook({
-    store: fileStateStore(dataDir),
+    store: stateStoreFor(process.env[OPENCHAMBER_SERVICE_DATA_DIR], (message) => console.warn(message)),
     setMark: (target, mark) => host.setMark(target, mark),
     now: () => Date.now(),
   });
-  void marks.start();
+  // Load the saved state before taking requests; an early event must not overwrite it.
+  await marks.start();
   const handler = createHandler({ token, drafts, marks, emit: (topic, data) => host.emit(topic, data) });
 
   const server = createServer(async (incoming, outgoing) => {
@@ -156,4 +173,4 @@ function serve(port: number, token: string): void {
 
 const port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 const token = process.env.OPENCHAMBER_SERVICE_TOKEN;
-if (Number.isInteger(port) && port > 0 && token) serve(port, token);
+if (Number.isInteger(port) && port > 0 && token) await serve(port, token);
