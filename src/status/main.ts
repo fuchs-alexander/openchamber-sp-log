@@ -2,14 +2,24 @@ import { connectHost } from "@openchamber/sdk";
 import { applyHostReady } from "@openchamber/sdk/ui";
 import { createApi } from "../panel/api.ts";
 import { createFlow } from "../panel/flow.ts";
-import { createStore } from "../panel/store.ts";
+import { createPendingStore, createStore } from "../panel/store.ts";
 import { ensureStyles, renderFlow } from "../panel/view.ts";
 import { createStatusController, type StatusView } from "./controller.ts";
 
 const host = connectHost();
 const store = createStore(host);
+// This frame is unmounted whenever OpenChamber hides the Work Status; open requests outlive it here.
+const pending = createPendingStore(host);
 // No host.close() in a status frame; the controller shows „Geloggt ✓“ instead.
-const flow = createFlow({ api: createApi(host), store, host, now: () => new Date(), closeOnDone: () => false });
+const flow = createFlow({
+  api: createApi(host),
+  store,
+  host,
+  pending,
+  rememberPending: true,
+  now: () => new Date(),
+  closeOnDone: () => false,
+});
 const root = document.getElementById("root") as HTMLDivElement;
 
 function reportHeight(): void {
@@ -57,6 +67,7 @@ function render(view: StatusView): void {
 const ctrl = createStatusController({
   flow,
   store,
+  pending,
   now: () => new Date(),
   delay: (ms, fn) => {
     const t = setTimeout(fn, ms);

@@ -1,5 +1,6 @@
 import type { Flow } from "../panel/flow.ts";
-import type { Store } from "../panel/store.ts";
+import { DRAFT_WAIT_MS } from "../panel/flow.ts";
+import type { PendingDraft, PendingStore, Store } from "../panel/store.ts";
 import { describeBinding, logButtonLabel } from "./describe.ts";
 
 /** How long the Work Status shows „Geloggt ✓“ before it returns to the summary. */
@@ -23,12 +24,15 @@ type Session = { id: string; title: string };
 export function createStatusController(deps: {
   flow: Pick<Flow, "state" | "subscribe" | "start" | "cancel">;
   store: Pick<Store, "getBinding">;
+  /** Open session-draft requests; a new frame continues the session's one. */
+  pending?: Pick<PendingStore, "get" | "clear">;
   now: () => Date;
   /** Runs `fn` after `ms`; returns a function that drops it. */
   delay: (ms: number, fn: () => void) => () => void;
   onChange: (view: StatusView) => void;
 }) {
   const { flow, store, now, delay, onChange } = deps;
+  const pending = deps.pending ?? null;
   let session: Session | null = null;
   let directory: string | null = null;
   let summary: Summary = { mode: "summary", lines: [], button: null };
@@ -58,12 +62,35 @@ export function createStatusController(deps: {
     if (!id) {
       summary = { mode: "summary", lines: ["Keine Session geöffnet."], button: null };
     } else {
-      const binding = await store.getBinding(id).catch(() => null);
+      const [binding, open] = await Promise.all([store.getBinding(id).catch(() => null), openRequest(id)]);
       if (run !== generation) return;
       boundDirectory = binding?.directory ?? null;
       summary = { mode: "summary", lines: describeBinding(binding, now()).lines, button: logButtonLabel(binding) };
+      // OpenChamber unmounts this frame whenever it hides the Work Status; a request
+      // sent by the previous frame goes on here instead of being lost.
+      if (open && view.mode === "summary" && session) {
+        show({ mode: "flow" });
+        void flow.start({
+          sessionId: session.id,
+          sessionTitle: session.title,
+          directory: open.directory ?? boundDirectory ?? directory,
+          messages: [],
+          resume: { logId: open.logId, startedAt: open.startedAt },
+        });
+        return;
+      }
     }
     if (view.mode === "summary") show(summary);
+  }
+
+  /** The session's open request; one past the flow's wait is dropped. */
+  async function openRequest(id: string): Promise<PendingDraft | null> {
+    if (!pending) return null;
+    const open = await pending.get(id).catch(() => null);
+    if (!open) return null;
+    if (now().getTime() - open.startedAt < DRAFT_WAIT_MS) return open;
+    await pending.clear(id, open.logId).catch(() => {});
+    return null;
   }
 
   function leave(): void {
@@ -106,7 +133,9 @@ export function createStatusController(deps: {
     cancelLogging(): void {
       if (view.mode === "summary") return;
       leave();
-      void refresh();
+      // „Abbrechen“ ends the request for good: the next frame must not continue it.
+      const id = session?.id;
+      void (id && pending ? pending.clear(id).catch(() => {}) : Promise.resolve()).then(refresh);
     },
   };
 }

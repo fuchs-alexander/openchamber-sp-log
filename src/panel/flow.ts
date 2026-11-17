@@ -4,7 +4,7 @@ import { formatNoteBlock } from "../log/note.ts";
 import { buildSessionDraftPrompt, parseSessionDraft } from "../log/session-draft.ts";
 import { GatewayError, type Api, type HostLike, type SpProject } from "./api.ts";
 import { createDraftsClient, DraftServiceError } from "./drafts-client.ts";
-import type { Binding, Store } from "./store.ts";
+import type { Binding, PendingStore, Store } from "./store.ts";
 
 export type Phase = "disconnected" | "pick-project" | "drafting" | "ready" | "saving" | "done" | "error";
 export type Target = string; // a task id, or "new"
@@ -29,6 +29,8 @@ export type FlowItem = {
    * with messages (the Work Status has none, so it shows an error instead).
    */
   allowFallback?: boolean;
+  /** Continue this session-draft request (sent by an earlier frame) instead of sending a new one. */
+  resume?: { logId: string; startedAt: number };
 };
 
 const EMPTY_DRAFT: Draft = { title: "", summary: "", hours: null };
@@ -98,11 +100,17 @@ export function createFlow(deps: {
   sleep?: (ms: number) => Promise<void>;
   /** Whether a save closes the frame (the dialog); default yes. The Work Status says no. */
   closeOnDone?: () => boolean;
+  /** Where open session-draft requests are kept; a save always clears the session's one. */
+  pending?: Pick<PendingStore, "set" | "clear">;
+  /** Whether this frame keeps its requests there (the Work Status, whose frame comes and goes). */
+  rememberPending?: boolean;
 }) {
   const { api, store, host, now } = deps;
   const newId = deps.newId ?? (() => crypto.randomUUID());
   const sleep = deps.sleep ?? sleepMs;
   const closeOnDone = deps.closeOnDone ?? (() => true);
+  const pending = deps.pending ?? null;
+  const remember = !!pending && deps.rememberPending === true;
   const drafts = createDraftsClient(host);
   let state = initialState();
   const listeners = new Set<(s: FlowState) => void>();
@@ -134,14 +142,31 @@ export function createFlow(deps: {
    */
   async function sessionDraft(run: number, current: FlowItem, since: { logId: string | null; hint: string | null }): Promise<SessionDrafted> {
     const sessionId = current.sessionId;
-    const logId = newId();
-    const deadline = now().getTime() + DRAFT_WAIT_MS;
-    try {
-      await drafts.start(sessionId, logId, buildSessionDraftPrompt(logId, since.logId, since.hint));
-    } catch (err) {
-      if (run !== runId) return "aborted";
-      return hasReason(err, "session-waiting") ? "waiting" : "unavailable";
+    const resume = current.resume ?? null;
+    const logId = resume?.logId ?? newId();
+    const startedAt = resume?.startedAt ?? now().getTime();
+    const deadline = startedAt + DRAFT_WAIT_MS;
+    const forget = async (): Promise<void> => {
+      if (remember) await pending!.clear(sessionId, logId).catch(() => {});
+    };
+    if (!resume) {
+      // Kept before sending, so a frame unmounted meanwhile still finds it.
+      if (remember) await pending!.set(sessionId, { logId, startedAt, directory: current.directory || null }).catch(() => {});
+      try {
+        await drafts.start(sessionId, logId, buildSessionDraftPrompt(logId, since.logId, since.hint));
+      } catch (err) {
+        await forget();
+        if (run !== runId) return "aborted";
+        return hasReason(err, "session-waiting") ? "waiting" : "unavailable";
+      }
     }
+    const result = await pollSessionDraft(run, sessionId, logId, deadline);
+    // Only a request that can no longer answer is forgotten; a draft stays until it is saved.
+    if (result === "unavailable") await forget();
+    return result;
+  }
+
+  async function pollSessionDraft(run: number, sessionId: string, logId: string, deadline: number): Promise<SessionDrafted> {
     try {
       while (true) {
         if (run !== runId) return "aborted";
@@ -348,6 +373,8 @@ export function createFlow(deps: {
       const saved = target === "new" ? await api.create(projectId, title, block, hours) : await api.append(target, block, hours);
       taskId = saved.id;
       timeBooked = saved.timeBooked;
+      // Logged: no frame may continue the request any more.
+      await pending?.clear(current.sessionId).catch(() => {});
     } catch (err) {
       if (run !== runId) return;
       if (err instanceof GatewayError && err.code === "task-gone") {

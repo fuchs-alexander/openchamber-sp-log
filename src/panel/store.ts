@@ -91,3 +91,35 @@ export function createStore(host: HostLike) {
 }
 
 export type Store = ReturnType<typeof createStore>;
+
+/**
+ * A session-draft request the Work Status sent and still waits for. The Work
+ * Status frame is unmounted whenever OpenChamber hides the panel, so the
+ * request is kept here and a new frame continues it instead of starting over.
+ */
+export type PendingDraft = { logId: string; startedAt: number; directory: string | null };
+
+function asPending(value: unknown): PendingDraft | null {
+  if (!value || typeof value !== "object") return null;
+  const { logId, startedAt, directory } = value as { logId?: unknown; startedAt?: unknown; directory?: unknown };
+  if (typeof logId !== "string" || typeof startedAt !== "number" || !Number.isFinite(startedAt)) return null;
+  return { logId, startedAt, directory: typeof directory === "string" ? directory : null };
+}
+
+export function createPendingStore(host: HostLike) {
+  return {
+    async get(sessionId: string): Promise<PendingDraft | null> {
+      return asPending(await host.storage.get(`pending:${sessionId}`, OPTS));
+    },
+    async set(sessionId: string, p: PendingDraft): Promise<void> {
+      await host.storage.set(`pending:${sessionId}`, { logId: p.logId, startedAt: p.startedAt, directory: p.directory }, OPTS);
+    },
+    /** With `logId`: only when that request is still the pending one. */
+    async clear(sessionId: string, logId?: string): Promise<void> {
+      if (logId !== undefined && (await this.get(sessionId))?.logId !== logId) return;
+      await host.storage.delete(`pending:${sessionId}`, OPTS);
+    },
+  };
+}
+
+export type PendingStore = ReturnType<typeof createPendingStore>;

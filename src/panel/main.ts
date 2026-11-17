@@ -2,7 +2,7 @@ import { connectHost, isGuestSessionItem, type GuestItem } from "@openchamber/sd
 import { applyHostReady } from "@openchamber/sdk/ui";
 import { createApi } from "./api.ts";
 import { createFlow } from "./flow.ts";
-import { createStore } from "./store.ts";
+import { createPendingStore, createStore } from "./store.ts";
 import { renderFlow } from "./view.ts";
 
 const host = connectHost();
@@ -11,6 +11,8 @@ let surface: string | null = null;
 const flow = createFlow({
   api: createApi(host),
   store: createStore(host),
+  // A save here also ends a request the Work Status still waits for.
+  pending: createPendingStore(host),
   host,
   now: () => new Date(),
   closeOnDone: () => surface === "dialog",
