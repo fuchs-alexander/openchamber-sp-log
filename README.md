@@ -10,8 +10,8 @@ OpenChamber-Erweiterung, die aus einer Session einen Arbeitslog-Eintrag entwirft
 3. In einer Session die Aktion „Nach Super Productivity loggen“ ausführen.
 
 ## Gateway deployen (Dell, systemd --user)
-
 ```sh
+ssh dell-pro-max 'mkdir -p ~/.local/opt/sp-gateway ~/.config/systemd/user; mkdir -p -m 700 ~/.config/sp-gateway'
 scp gateway/*.ts dell-pro-max:.local/opt/sp-gateway/
 scp deploy/sp-gateway.service dell-pro-max:.config/systemd/user/
 ssh dell-pro-max bash -s <<'EOF'
