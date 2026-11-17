@@ -61,6 +61,22 @@ function idOf(data: unknown): string {
   return id;
 }
 
+/**
+ * A written log. `timeBooked`: whether the hours were booked as tracked time
+ * in SP; null when the gateway booked nothing (hours 0, or an older gateway).
+ */
+export type SaveResult = { id: string; timeBooked: boolean | null; timeError: string | null };
+
+function saveResultOf(data: unknown): SaveResult {
+  const id = idOf(data);
+  const record = data as { timeBooked?: unknown; timeError?: unknown };
+  return {
+    id,
+    timeBooked: typeof record.timeBooked === "boolean" ? record.timeBooked : null,
+    timeError: typeof record.timeError === "string" ? record.timeError : null,
+  };
+}
+
 function listOf(data: unknown): unknown[] {
   if (!Array.isArray(data)) throw new GatewayError(200, "bad-response");
   return data;
@@ -98,11 +114,11 @@ export function createApi(host: HostLike) {
       const path = `/projects/${encodeURIComponent(projectId)}/tasks`;
       return listOf(await call({ method: "GET", path })) as MatchCandidate[];
     },
-    async create(projectId: string, title: string, notes: string): Promise<string> {
-      return idOf(await call(post("/tasks", { projectId, title, notes })));
+    async create(projectId: string, title: string, notes: string, hours: number): Promise<SaveResult> {
+      return saveResultOf(await call(post("/tasks", { projectId, title, notes, hours })));
     },
-    async append(taskId: string, text: string): Promise<string> {
-      return idOf(await call(post(`/tasks/${encodeURIComponent(taskId)}/append`, { text })));
+    async append(taskId: string, text: string, hours: number): Promise<SaveResult> {
+      return saveResultOf(await call(post(`/tasks/${encodeURIComponent(taskId)}/append`, { text, hours })));
     },
   };
 }

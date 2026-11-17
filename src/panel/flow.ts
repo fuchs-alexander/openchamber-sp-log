@@ -44,6 +44,7 @@ const TEXT = {
   logged: "In Super Productivity geloggt",
   logPointLost:
     "Hinweis: Letzter Log-Stand nicht gefunden – Schätzung umfasst möglicherweise bereits geloggte Arbeit. Bitte Stunden prüfen.",
+  timeNotBooked: "Geloggt, aber Zeit konnte in Super Productivity nicht erfasst werden – bitte dort nachtragen.",
   bindingFailed: "Geloggt, aber Session-Bindung konnte nicht gespeichert werden – beim nächsten Log Stunden prüfen.",
   sessionWorking: "Session arbeitet – Entwurf folgt, sobald sie fertig ist …",
   sessionWaiting: "Session wartet auf deine Eingabe – bitte dort antworten.",
@@ -342,8 +343,11 @@ export function createFlow(deps: {
     const block = formatNoteBlock({ date, title, hours, summary: draft.summary.trim(), sessionTitle: current.sessionTitle });
 
     let taskId: string;
+    let timeBooked: boolean | null;
     try {
-      taskId = target === "new" ? await api.create(projectId, title, block) : await api.append(target, block);
+      const saved = target === "new" ? await api.create(projectId, title, block, hours) : await api.append(target, block, hours);
+      taskId = saved.id;
+      timeBooked = saved.timeBooked;
     } catch (err) {
       if (run !== runId) return;
       if (err instanceof GatewayError && err.code === "task-gone") {
@@ -387,9 +391,11 @@ export function createFlow(deps: {
         body: JSON.stringify({ sessionId: current.sessionId, at: date.getTime(), hours }),
       })
       .catch(() => {});
-    const toast = bound
-      ? ({ kind: "success", message: TEXT.logged } as const)
-      : ({ kind: "error", message: TEXT.bindingFailed } as const);
+    const toast = !bound
+      ? ({ kind: "error", message: TEXT.bindingFailed } as const)
+      : timeBooked === false
+        ? ({ kind: "error", message: TEXT.timeNotBooked } as const)
+        : ({ kind: "success", message: TEXT.logged } as const);
     await host.toast(toast).catch(() => {});
     if (run === runId) set({ phase: "done", message: null });
     if (closeOnDone()) await host.close().catch(() => {});

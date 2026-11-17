@@ -10,11 +10,14 @@ export type GatewayOptions = {
   fetch?: typeof fetch;
   // Project id → folder path. Failures are ignored: projects get folder null.
   folders?: () => Promise<Map<string, string>>;
+  // Clock for the day logged hours are booked on (gateway local date).
+  now?: () => Date;
 };
 
 export const MAX_BODY_BYTES = 65536;
 export const MAX_TITLE_LENGTH = 200;
 export const EXCERPT_LENGTH = 300;
+export const MAX_HOURS = 24;
 const UPSTREAM_TIMEOUT_MS = 10_000;
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -89,9 +92,22 @@ function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+// Optional `hours`: absent, null or 0 → no booking; otherwise 0 < hours ≤ 24.
+function checkHours(value: unknown): number {
+  if (value === undefined || value === null) return 0;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > MAX_HOURS) fail(400, "invalid-hours");
+  return value;
+}
+
+function localDate(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 export function createGateway(opts: GatewayOptions): (req: Request) => Promise<Response> {
   const doFetch = opts.fetch ?? fetch;
   const base = opts.spUrl.replace(/\/+$/, "");
+  const now = opts.now ?? (() => new Date());
 
   // Returns the upstream `data` field, or null on 404 when allowMissing is set.
   async function sp(method: string, path: string, body?: unknown, allowMissing = false): Promise<unknown> {
@@ -122,6 +138,31 @@ export function createGateway(opts: GatewayOptions): (req: Request) => Promise<R
     const record = asRecord(payload);
     if (record.ok !== true) fail(502, "sp-error");
     return record.data;
+  }
+
+  // Adds `hours` as tracked time on today's date. The note/task is already
+  // written, so a failure is reported in the response instead of thrown.
+  async function bookTime(id: string, hours: number): Promise<Response> {
+    if (hours <= 0) return json({ id });
+    const duration = Math.max(1, Math.round(hours * 3_600_000));
+    let res: Response;
+    try {
+      res = await doFetch(`${base}/tasks/${id}/time`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${opts.spToken()}`,
+          accept: "application/json",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ date: localDate(now()), duration }),
+        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      });
+    } catch {
+      return json({ id, timeBooked: false, timeError: "sp-unreachable" });
+    }
+    await res.body?.cancel().catch(() => {});
+    if (!res.ok) return json({ id, timeBooked: false, timeError: "sp-time-rejected" });
+    return json({ id, timeBooked: true });
   }
 
   async function listProjects(): Promise<Response> {
@@ -161,15 +202,17 @@ export function createGateway(opts: GatewayOptions): (req: Request) => Promise<R
     if (typeof title !== "string" || title.trim() === "" || title.length > MAX_TITLE_LENGTH) fail(400, "invalid-title");
     const notes = body.notes ?? "";
     if (typeof notes !== "string") fail(400, "invalid-notes");
+    const hours = checkHours(body.hours);
     const data = asRecord(await sp("POST", "/tasks", { title, notes, projectId }));
-    if (typeof data.id !== "string") fail(502, "sp-error");
-    return json({ id: data.id });
+    if (typeof data.id !== "string" || !ID_PATTERN.test(data.id)) fail(502, "sp-error");
+    return bookTime(data.id, hours);
   }
 
   async function appendToTask(id: string, req: Request): Promise<Response> {
     const body = await readJsonBody(req);
     const text = body.text;
     if (typeof text !== "string" || text.trim() === "") fail(400, "invalid-text");
+    const hours = checkHours(body.hours);
     const current = await sp("GET", `/tasks/${id}`, undefined, true);
     if (current === null) fail(404, "task-gone");
     const task = asRecord(current);
@@ -177,7 +220,7 @@ export function createGateway(opts: GatewayOptions): (req: Request) => Promise<R
     const old = asString(task.notes);
     const notes = old === "" ? text : `${old}\n\n${text}`;
     await sp("PATCH", `/tasks/${id}`, { notes });
-    return json({ id });
+    return bookTime(id, hours);
   }
 
   async function route(req: Request): Promise<Response> {

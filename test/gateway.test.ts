@@ -267,4 +267,132 @@ describe("gateway", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual([{ id: "A", title: "A", folder: null }]);
   });
+
+  describe("time booking", () => {
+    const TODAY = new Date(2026, 10, 17, 23, 30);
+    function gwt(routes: Record<string, Route>) {
+      const sp = spFake(routes);
+      const handle = createGateway({
+        spUrl: SP_URL,
+        spToken: () => SP_TOKEN,
+        gatewayToken: GW_TOKEN,
+        fetch: sp.fetch,
+        now: () => TODAY,
+      });
+      return { sp, handle };
+    }
+    const createOk = { "POST /tasks": () => json({ ok: true, data: { id: "NEW1" } }) };
+    const appendOk = {
+      "GET /tasks/T": () => json({ ok: true, data: { id: "T", notes: "alt", isDone: false } }),
+      "PATCH /tasks/T": () => json({ ok: true, data: { id: "T" } }),
+    };
+
+    test("create with hours books time on the local day", async () => {
+      const { sp, handle } = gwt({ ...createOk, "POST /tasks/NEW1/time": () => json({ ok: true, data: { id: "NEW1" } }) });
+      const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "n", hours: 2.5 }));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ id: "NEW1", timeBooked: true });
+      expect(sp.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["POST /tasks", "POST /tasks/NEW1/time"]);
+      expect(sp.calls[0]!.body).toEqual({ title: "Log", notes: "n", projectId: "A" });
+      expect(sp.calls[1]!.body).toEqual({ date: "2026-11-17", duration: 9_000_000 });
+      expect(sp.calls[1]!.auth).toBe(`Bearer ${SP_TOKEN}`);
+    });
+
+    test("append with hours books time after the patch", async () => {
+      const { sp, handle } = gwt({ ...appendOk, "POST /tasks/T/time": () => json({ ok: true }) });
+      const res = await handle(req("POST", "/tasks/T/append", { text: "neu", hours: 0.75 }));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ id: "T", timeBooked: true });
+      expect(sp.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /tasks/T", "PATCH /tasks/T", "POST /tasks/T/time"]);
+      expect(sp.calls[2]!.body).toEqual({ date: "2026-11-17", duration: 2_700_000 });
+    });
+
+    test("duration is an integer of ms", async () => {
+      const { sp, handle } = gwt({ ...createOk, "POST /tasks/NEW1/time": () => json({ ok: true }) });
+      await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours: 1 / 3 }));
+      const d = (sp.calls[1]!.body as { duration: number }).duration;
+      expect(Number.isInteger(d)).toBe(true);
+      expect(d).toBe(1_200_000);
+    });
+
+    test("hours 0, absent or null → no booking", async () => {
+      for (const extra of [{ hours: 0 }, {}, { hours: null }]) {
+        const { sp, handle } = gwt({ ...createOk, ...appendOk });
+        const c = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", ...extra }));
+        expect(c.status).toBe(200);
+        expect(await c.json()).toEqual({ id: "NEW1" });
+        const a = await handle(req("POST", "/tasks/T/append", { text: "neu", ...extra }));
+        expect(a.status).toBe(200);
+        expect(await a.json()).toEqual({ id: "T" });
+        expect(sp.calls.some((x) => x.path.endsWith("/time"))).toBe(false);
+      }
+    });
+
+    test("invalid hours → 400 before anything is written", async () => {
+      for (const hours of [-1, 24.01, "2", Number.NaN, true, [1], {}]) {
+        const { sp, handle } = gwt({ ...createOk, ...appendOk });
+        const body = JSON.stringify({ projectId: "A", title: "Log", notes: "", hours }).replace('"hours":null', '"hours":"NaN"');
+        const c = await handle(req("POST", "/tasks", body));
+        expect(c.status).toBe(400);
+        expect(await c.json()).toEqual({ error: "invalid-hours" });
+        const a = await handle(req("POST", "/tasks/T/append", { text: "neu", hours: typeof hours === "number" && Number.isNaN(hours) ? "NaN" : hours }));
+        expect(a.status).toBe(400);
+        expect(sp.calls).toHaveLength(0);
+      }
+    });
+
+    test("hours 24 is allowed", async () => {
+      const { sp, handle } = gwt({ ...createOk, "POST /tasks/NEW1/time": () => json({ ok: true }) });
+      const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours: 24 }));
+      expect(await res.json()).toEqual({ id: "NEW1", timeBooked: true });
+      expect(sp.calls[1]!.body).toEqual({ date: "2026-11-17", duration: 86_400_000 });
+    });
+
+    test("rejected booking → 200 with timeBooked false", async () => {
+      const { handle } = gwt({
+        ...createOk,
+        "POST /tasks/NEW1/time": () => json({ ok: false, error: { message: "Task has subtasks" } }, 400),
+      });
+      const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours: 1 }));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ id: "NEW1", timeBooked: false, timeError: "sp-time-rejected" });
+    });
+
+    test("unreachable SP during booking → 200 with sp-unreachable", async () => {
+      let n = 0;
+      const handle = createGateway({
+        spUrl: SP_URL,
+        spToken: () => SP_TOKEN,
+        gatewayToken: GW_TOKEN,
+        now: () => TODAY,
+        fetch: (async (input: RequestInfo | URL) => {
+          n++;
+          if (String(input).endsWith("/time")) throw new Error(`boom Bearer ${SP_TOKEN}`);
+          return json({ ok: true, data: { id: "T", notes: "", isDone: false } });
+        }) as unknown as typeof fetch,
+      });
+      const res = await handle(req("POST", "/tasks/T/append", { text: "neu", hours: 1 }));
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(JSON.parse(text)).toEqual({ id: "T", timeBooked: false, timeError: "sp-unreachable" });
+      expect(text).not.toContain(SP_TOKEN);
+      expect(n).toBe(3);
+    });
+
+    test("failed create does not book", async () => {
+      const { sp, handle } = gwt({ "POST /tasks": () => json({ ok: false }, 500) });
+      const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours: 1 }));
+      expect(res.status).toBe(502);
+      expect(sp.calls).toHaveLength(1);
+    });
+
+    test("default date is the gateway's local today", async () => {
+      const sp = spFake({ ...createOk, "POST /tasks/NEW1/time": () => json({ ok: true }) });
+      const handle = createGateway({ spUrl: SP_URL, spToken: () => SP_TOKEN, gatewayToken: GW_TOKEN, fetch: sp.fetch });
+      await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours: 1 }));
+      const d = new Date();
+      const pad = (x: number) => String(x).padStart(2, "0");
+      expect((sp.calls[1]!.body as { date: string }).date).toBe(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`);
+    });
+  });
 });

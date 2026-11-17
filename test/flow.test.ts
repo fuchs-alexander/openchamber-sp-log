@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { HostRequestError, type GenerateRequest, type GuestRequest, type GuestRequestResult } from "@openchamber/sdk";
 import type { Msg } from "../src/log/draft.ts";
 import type { MatchCandidate } from "../src/log/match.ts";
-import { GatewayError, type Api, type HostLike, type SpProject } from "../src/panel/api.ts";
+import { GatewayError, type Api, type HostLike, type SaveResult, type SpProject } from "../src/panel/api.ts";
 import type { Binding, Store } from "../src/panel/store.ts";
 import { createFlow } from "../src/panel/flow.ts";
 
@@ -55,8 +55,8 @@ function setup(opts: {
   tasks?: MatchCandidate[];
   projects?: SpProject[] | Error;
   generate?: Gen[];
-  append?: (taskId: string) => string | Error;
-  create?: () => string | Error;
+  append?: (taskId: string) => string | Error | SaveResult;
+  create?: () => string | Error | SaveResult;
   setBindingError?: Error;
   setProject?: () => Promise<void>;
   /** The extension's service; by default there is none (`NO_SERVICE`). */
@@ -66,8 +66,8 @@ function setup(opts: {
   closeOnDone?: () => boolean;
 } = {}) {
   const calls = {
-    create: [] as { projectId: string; title: string; notes: string }[],
-    append: [] as { taskId: string; text: string }[],
+    create: [] as { projectId: string; title: string; notes: string; hours: number }[],
+    append: [] as { taskId: string; text: string; hours: number }[],
     tasks: [] as string[],
     generate: [] as GenerateRequest[],
     setProject: [] as { dir: string; id: string }[],
@@ -95,17 +95,17 @@ function setup(opts: {
       calls.tasks.push(projectId);
       return tasks;
     },
-    create: async (projectId, title, notes) => {
-      calls.create.push({ projectId, title, notes });
+    create: async (projectId, title, notes, hours) => {
+      calls.create.push({ projectId, title, notes, hours });
       const r = opts.create?.() ?? "new1";
       if (r instanceof Error) throw r;
-      return r;
+      return typeof r === "string" ? { id: r, timeBooked: true, timeError: null } : r;
     },
-    append: async (taskId, text) => {
-      calls.append.push({ taskId, text });
+    append: async (taskId, text, hours) => {
+      calls.append.push({ taskId, text, hours });
       const r = opts.append?.(taskId) ?? taskId;
       if (r instanceof Error) throw r;
-      return r;
+      return typeof r === "string" ? { id: r, timeBooked: true, timeError: null } : r;
     },
   };
   const store: Store = {
@@ -551,6 +551,41 @@ describe("flow", () => {
     expect(calls.toast).toEqual([{ kind: "success", message: "In Super Productivity geloggt" }]);
     expect(calls.close).toBe(1);
     expect(flow.state.phase).toBe("done");
+  });
+
+  test("flow: passes the hours to create and append", async () => {
+    const a = setup();
+    await a.flow.start(a.item);
+    await a.flow.save();
+    expect(a.calls.create[0]!.hours).toBe(2.5);
+    const b = setup();
+    await b.flow.start(b.item);
+    b.flow.setTarget("t2");
+    b.flow.edit({ hours: 0.75 });
+    await b.flow.save();
+    expect(b.calls.append[0]!.hours).toBe(0.75);
+  });
+
+  test("flow: time not booked → error toast, still binds and finishes", async () => {
+    const { flow, calls, item } = setup({ create: () => ({ id: "new1", timeBooked: false, timeError: "sp-time-rejected" }) });
+    await flow.start(item);
+    await flow.save();
+    expect(calls.toast).toEqual([
+      { kind: "error", message: "Geloggt, aber Zeit konnte in Super Productivity nicht erfasst werden – bitte dort nachtragen." },
+    ]);
+    expect(calls.setBinding).toMatchObject([{ sessionId: "s1", b: { taskId: "new1" } }]);
+    expect(calls.service.filter((r) => r.path === "/logged")).toHaveLength(1);
+    expect(calls.close).toBe(1);
+    expect(flow.state.phase).toBe("done");
+  });
+
+  test("flow: no time booking reported (hours 0 / old gateway) → success toast", async () => {
+    const { flow, calls, item } = setup({ create: () => ({ id: "new1", timeBooked: null, timeError: null }) });
+    await flow.start(item);
+    flow.edit({ hours: 0 });
+    await flow.save();
+    expect(calls.create[0]!.hours).toBe(0);
+    expect(calls.toast).toEqual([{ kind: "success", message: "In Super Productivity geloggt" }]);
   });
 
   test("flow: reports a saved log to the service", async () => {
