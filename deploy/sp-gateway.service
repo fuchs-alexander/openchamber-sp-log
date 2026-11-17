@@ -1,0 +1,16 @@
+[Unit]
+Description=Super Productivity log gateway (OpenChamber)
+After=network-online.target super-productivity.service
+Wants=super-productivity.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node %h/.local/opt/sp-gateway/server.ts
+Environment=SP_TOKEN_FILE=%h/.config/superProductivity/local-rest-api-token
+Environment=SP_GATEWAY_TOKEN_FILE=%h/.config/sp-gateway/gateway-token
+UMask=0077
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
