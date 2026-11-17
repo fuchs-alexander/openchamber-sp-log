@@ -98,7 +98,7 @@ describe("gateway", () => {
     const res = await handle(req("GET", "/projects"));
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("application/json");
-    expect(await res.json()).toEqual([{ id: "A", title: "A" }]);
+    expect(await res.json()).toEqual([{ id: "A", title: "A", folder: null }]);
     expect(sp.calls).toHaveLength(1);
     expect(sp.calls[0]!.auth).toBe(`Bearer ${SP_TOKEN}`);
   });
@@ -232,5 +232,39 @@ describe("gateway", () => {
     token = "second";
     await handle(req("GET", "/projects"));
     expect(sp.calls.map((c) => c.auth)).toEqual(["Bearer first", "Bearer second"]);
+  });
+  test("gateway: projects carry folder from folders()", async () => {
+    const sp = spFake({
+      "GET /projects": () => json({ ok: true, data: [{ id: "A", title: "A" }, { id: "B", title: "B" }] }),
+    });
+    const handle = createGateway({
+      spUrl: SP_URL,
+      spToken: () => SP_TOKEN,
+      gatewayToken: GW_TOKEN,
+      fetch: sp.fetch,
+      folders: async () => new Map([["A", "Posylka / Intern"]]),
+    });
+    const res = await handle(req("GET", "/projects"));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([
+      { id: "A", title: "A", folder: "Posylka / Intern" },
+      { id: "B", title: "B", folder: null },
+    ]);
+  });
+
+  test("gateway: failing folders() yields folder null with 200", async () => {
+    const sp = spFake({ "GET /projects": () => json({ ok: true, data: [{ id: "A", title: "A" }] }) });
+    const handle = createGateway({
+      spUrl: SP_URL,
+      spToken: () => SP_TOKEN,
+      gatewayToken: GW_TOKEN,
+      fetch: sp.fetch,
+      folders: async () => {
+        throw new Error("backup broken");
+      },
+    });
+    const res = await handle(req("GET", "/projects"));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([{ id: "A", title: "A", folder: null }]);
   });
 });

@@ -8,6 +8,8 @@ export type GatewayOptions = {
   spToken: () => string;
   gatewayToken: string;
   fetch?: typeof fetch;
+  // Project id → folder path. Failures are ignored: projects get folder null.
+  folders?: () => Promise<Map<string, string>>;
 };
 
 export const MAX_BODY_BYTES = 65536;
@@ -124,10 +126,18 @@ export function createGateway(opts: GatewayOptions): (req: Request) => Promise<R
 
   async function listProjects(): Promise<Response> {
     const data = await sp("GET", "/projects");
+    let folders = new Map<string, string>();
+    if (opts.folders) {
+      try {
+        folders = await opts.folders();
+      } catch {
+        // Folders are optional; never fail the project list because of them.
+      }
+    }
     const projects = (Array.isArray(data) ? data : [])
       .map(asRecord)
       .filter((p) => p.isArchived !== true && p.isHiddenFromMenu !== true && typeof p.id === "string")
-      .map((p) => ({ id: p.id as string, title: asString(p.title) }));
+      .map((p) => ({ id: p.id as string, title: asString(p.title), folder: folders.get(p.id as string) ?? null }));
     return json(projects);
   }
 

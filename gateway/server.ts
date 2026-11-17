@@ -4,12 +4,15 @@
 //   SP_URL                 (default http://127.0.0.1:3876)
 //   SP_TOKEN_FILE          (default ~/.config/superProductivity/local-rest-api-token)
 //   SP_GATEWAY_TOKEN_FILE  (default ~/.config/sp-gateway/gateway-token)
+//   SP_BACKUP_DIR          (default ~/.config/superProductivity/backups)
 // Tokens are never logged.
 import { readFileSync } from "node:fs";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
+import { folderIndex } from "./folders.ts";
 import { createGateway } from "./gateway.ts";
 
 const HOST = "127.0.0.1";
@@ -32,6 +35,39 @@ const spUrl = process.env.SP_URL ?? "http://127.0.0.1:3876";
 const spTokenFile = expandHome(process.env.SP_TOKEN_FILE ?? "~/.config/superProductivity/local-rest-api-token");
 const gatewayTokenFile = expandHome(process.env.SP_GATEWAY_TOKEN_FILE ?? "~/.config/sp-gateway/gateway-token");
 
+const backupDir = expandHome(process.env.SP_BACKUP_DIR ?? "~/.config/superProductivity/backups");
+
+// Folders come from the newest SP backup (~9 MB, rewritten every 5 minutes).
+// Re-parse only when the newest file or its mtime changes. Any error yields an
+// empty map; nothing about the backup is logged.
+let folderCache: { path: string; mtimeMs: number; index: Map<string, string> } | null = null;
+
+async function loadFolders(): Promise<Map<string, string>> {
+  try {
+    let newest: { path: string; mtimeMs: number } | null = null;
+    for (const name of await readdir(backupDir)) {
+      if (!name.endsWith(".json")) continue;
+      const path = join(backupDir, name);
+      try {
+        const info = await stat(path);
+        if (info.isFile() && (newest === null || info.mtimeMs > newest.mtimeMs)) newest = { path, mtimeMs: info.mtimeMs };
+      } catch {
+        // File vanished between readdir and stat.
+      }
+    }
+    if (newest === null) return new Map();
+    if (folderCache && folderCache.path === newest.path && folderCache.mtimeMs === newest.mtimeMs) return folderCache.index;
+    const backup: unknown = JSON.parse(await readFile(newest.path, "utf8"));
+    const menuTree = typeof backup === "object" && backup !== null ? (backup as Record<string, unknown>).menuTree : undefined;
+    const projectTree = typeof menuTree === "object" && menuTree !== null ? (menuTree as Record<string, unknown>).projectTree : undefined;
+    const index = folderIndex(projectTree);
+    folderCache = { ...newest, index };
+    return index;
+  } catch {
+    return new Map();
+  }
+}
+
 const gatewayToken = readToken(gatewayTokenFile);
 if (gatewayToken.length < MIN_GATEWAY_TOKEN_LENGTH) {
   console.error(
@@ -49,6 +85,7 @@ const handle = createGateway({
   // Re-read on every request so a regenerated SP token works without restart.
   spToken: () => readToken(spTokenFile),
   gatewayToken,
+  folders: loadFolders,
 });
 
 function toRequest(req: IncomingMessage): Request {
