@@ -1,7 +1,9 @@
 import { buildDraftRequest, messagesSince, parseDraft, type Draft, type Msg } from "../log/draft.ts";
 import { buildMatchRequest, parseMatch, type MatchCandidate } from "../log/match.ts";
 import { formatNoteBlock } from "../log/note.ts";
+import { buildSessionDraftPrompt, parseSessionDraft } from "../log/session-draft.ts";
 import { GatewayError, type Api, type HostLike, type SpProject } from "./api.ts";
+import { createDraftsClient } from "./drafts-client.ts";
 import type { Binding, Store } from "./store.ts";
 
 export type Phase = "disconnected" | "pick-project" | "drafting" | "ready" | "saving" | "done" | "error";
@@ -38,7 +40,25 @@ const TEXT = {
   logPointLost:
     "Hinweis: Letzter Log-Stand nicht gefunden – Schätzung umfasst möglicherweise bereits geloggte Arbeit. Bitte Stunden prüfen.",
   bindingFailed: "Geloggt, aber Session-Bindung konnte nicht gespeichert werden – beim nächsten Log Stunden prüfen.",
+  sessionDrafting: "Session erstellt Entwurf …",
+  sessionBusy: "Wartet, bis die Session frei ist …",
+  sessionWaiting: "Session wartet auf deine Eingabe – bitte dort antworten.",
+  sessionFallback: "Session-Entwurf nicht verfügbar – Entwurf vom Small Model.",
 };
+
+/** How often and how long the panel asks the service for the session's draft. */
+export const DRAFT_POLL_MS = 2_000;
+export const DRAFT_WAIT_MS = 10 * 60 * 1000;
+
+type Drafted = { draft: Draft; failed: boolean; logPointLost: boolean; fallback: boolean };
+
+const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+function waitMessage(sessionStatus: string): string {
+  if (sessionStatus === "busy") return TEXT.sessionBusy;
+  if (sessionStatus === "waiting") return TEXT.sessionWaiting;
+  return TEXT.sessionDrafting;
+}
 
 const isDisconnected = (err: unknown): boolean => err instanceof GatewayError && err.code === "disconnected";
 
@@ -46,8 +66,19 @@ function initialState(): FlowState {
   return { phase: "drafting", projects: [], projectId: null, tasks: [], target: "new", draft: EMPTY_DRAFT, message: null };
 }
 
-export function createFlow(deps: { api: Api; store: Store; host: HostLike; now: () => Date }) {
+export function createFlow(deps: {
+  api: Api;
+  store: Store;
+  host: HostLike;
+  now: () => Date;
+  /** A fresh id for every session-draft request. */
+  newId?: () => string;
+  sleep?: (ms: number) => Promise<void>;
+}) {
   const { api, store, host, now } = deps;
+  const newId = deps.newId ?? (() => crypto.randomUUID());
+  const sleep = deps.sleep ?? sleepMs;
+  const drafts = createDraftsClient(host);
   let state = initialState();
   const listeners = new Set<(s: FlowState) => void>();
 
@@ -56,7 +87,7 @@ export function createFlow(deps: { api: Api; store: Store; host: HostLike; now: 
   let item: FlowItem | null = null;
   let directory = "global";
   let binding: Binding | null = null;
-  let draftPromise: Promise<{ draft: Draft; failed: boolean; logPointLost: boolean }> | null = null;
+  let draftPromise: Promise<Drafted> | null = null;
   let draftApplied = false;
 
   function set(patch: Partial<FlowState>): void {
@@ -69,19 +100,54 @@ export function createFlow(deps: { api: Api; store: Store; host: HostLike; now: 
     else set({ phase: "error", message: TEXT.loadFailed });
   }
 
-  function ensureDraft(): Promise<{ draft: Draft; failed: boolean; logPointLost: boolean }> {
+  /**
+   * Asks the logged session itself (through the service) for the draft.
+   * Null when it is not available: then the Small Model drafts instead.
+   * "aborted" when the run was replaced or cancelled meanwhile.
+   */
+  async function sessionDraft(run: number, sessionId: string): Promise<Draft | null | "aborted"> {
+    const logId = newId();
+    const deadline = now().getTime() + DRAFT_WAIT_MS;
+    try {
+      await drafts.start(sessionId, logId, buildSessionDraftPrompt(logId));
+      while (true) {
+        if (run !== runId) return "aborted";
+        if (now().getTime() >= deadline) return null;
+        await sleep(DRAFT_POLL_MS);
+        if (run !== runId) return "aborted";
+        const poll = await drafts.poll(sessionId, logId);
+        if (run !== runId) return "aborted";
+        if (poll.state === "done") return parseSessionDraft(poll.text ?? "", logId);
+        if (poll.state === "failed") return null;
+        if (state.phase === "drafting") set({ message: waitMessage(poll.sessionStatus) });
+      }
+    } catch {
+      return run === runId ? null : "aborted";
+    }
+  }
+
+  /** The Small Model's draft from the messages since the last logged point. */
+  function smallModelDraft(current: FlowItem): Promise<Drafted> {
+    const lastId = binding?.lastMessageId ?? null;
+    const lastCreatedAt = binding?.lastCreatedAt ?? null;
+    const since = messagesSince(current.messages, lastId, lastCreatedAt);
+    // A logged point existed but neither its id nor its timestamp can locate it any more.
+    const logPointLost = lastId !== null && lastCreatedAt === null && !current.messages.some((m) => m.id === lastId);
+    return host
+      .generate(buildDraftRequest(since, current.sessionTitle))
+      .then((res) => ({ draft: parseDraft(res.text), failed: false, logPointLost, fallback: true }))
+      .catch(() => ({ draft: EMPTY_DRAFT, failed: true, logPointLost, fallback: true }));
+  }
+
+  function ensureDraft(run: number): Promise<Drafted> {
     if (!draftPromise) {
       const current = item!;
-      const lastId = binding?.lastMessageId ?? null;
-      const lastCreatedAt = binding?.lastCreatedAt ?? null;
-      const since = messagesSince(current.messages, lastId, lastCreatedAt);
-      // A logged point existed but neither its id nor its timestamp can locate it any more.
-      const logPointLost =
-        lastId !== null && lastCreatedAt === null && !current.messages.some((m) => m.id === lastId);
-      draftPromise = host
-        .generate(buildDraftRequest(since, current.sessionTitle))
-        .then((res) => ({ draft: parseDraft(res.text), failed: false, logPointLost }))
-        .catch(() => ({ draft: EMPTY_DRAFT, failed: true, logPointLost }));
+      set({ message: TEXT.sessionDrafting });
+      draftPromise = sessionDraft(run, current.sessionId).then((draft) => {
+        if (draft === "aborted") return { draft: EMPTY_DRAFT, failed: false, logPointLost: false, fallback: false };
+        if (draft) return { draft, failed: false, logPointLost: false, fallback: false };
+        return smallModelDraft(current);
+      });
     }
     return draftPromise;
   }
@@ -100,9 +166,9 @@ export function createFlow(deps: { api: Api; store: Store; host: HostLike; now: 
   async function loadProject(run: number, projectId: string, initial: boolean): Promise<void> {
     set({ phase: "drafting", projectId, message: null });
     let tasks: MatchCandidate[];
-    let drafted: { draft: Draft; failed: boolean; logPointLost: boolean };
+    let drafted: Drafted;
     try {
-      [tasks, drafted] = await Promise.all([api.tasks(projectId), ensureDraft()]);
+      [tasks, drafted] = await Promise.all([api.tasks(projectId), ensureDraft(run)]);
     } catch (err) {
       if (run === runId) fail(err);
       return;
@@ -113,6 +179,7 @@ export function createFlow(deps: { api: Api; store: Store; host: HostLike; now: 
     if (!draftApplied) {
       draftApplied = true;
       set({ draft: drafted.draft });
+      if (drafted.fallback) notes.push(TEXT.sessionFallback);
       if (drafted.logPointLost) notes.push(TEXT.logPointLost);
       if (drafted.failed) notes.push(TEXT.draftFailed);
     }
@@ -181,6 +248,11 @@ export function createFlow(deps: { api: Api; store: Store; host: HostLike; now: 
     await loadProject(run, id, initial);
   }
 
+  /** Stops the current run: pending session-draft polls end and late results are dropped. */
+  function cancel(): void {
+    runId++;
+  }
+
   function setTarget(target: Target): void {
     if (target === "new" || state.tasks.some((t) => t.id === target)) set({ target });
   }
@@ -245,6 +317,7 @@ export function createFlow(deps: { api: Api; store: Store; host: HostLike; now: 
     },
     start,
     chooseProject,
+    cancel,
     setTarget,
     edit,
     save,

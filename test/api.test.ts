@@ -20,6 +20,7 @@ function fakeHost(reply: (req: GuestRequest) => Reply = () => ({ status: 200, bo
       if (r instanceof Error) throw r;
       return r as { status: number; body: string };
     },
+    serviceRequest: async () => ({ status: 200, body: "{}" }),
     storage: {
       get: async (key: string, opts?: { scope?: "instance" | "device" }) => {
         scopes.push(opts?.scope);

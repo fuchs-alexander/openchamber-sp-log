@@ -97,7 +97,10 @@ el.hours.addEventListener("input", () => {
   flow.edit({ hours: n === null || Number.isFinite(n) ? n : null });
 });
 el.save.addEventListener("click", () => void flow.save());
-el.cancel.addEventListener("click", () => void host.close().catch(() => {}));
+el.cancel.addEventListener("click", () => {
+  flow.cancel();
+  void host.close().catch(() => {});
+});
 
 let started: string | null = null;
 function handleItem(item: GuestItem | null): void {

@@ -1,6 +1,6 @@
 {
   "name": "openchamber-sp-log",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -24,6 +24,8 @@
       "panel": { "entry": "dist/panel/index.html", "mobile": true },
       "attach": "dialog",
       "capabilities": ["model"],
+      "service": { "entry": "dist/service/main.js", "runtime": "host" },
+      "sessionControl": { "content": true },
       "actions": [
         { "id": "log-session", "label": "Nach Super Productivity loggen", "where": "session", "payload": ["messages"], "mode": "open" }
       ],

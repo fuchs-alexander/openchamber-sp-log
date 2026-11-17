@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { GenerateRequest } from "@openchamber/sdk";
+import { HostRequestError, type GenerateRequest, type GuestRequest, type GuestRequestResult } from "@openchamber/sdk";
 import type { Msg } from "../src/log/draft.ts";
 import type { MatchCandidate } from "../src/log/match.ts";
 import { GatewayError, type Api, type HostLike, type SpProject } from "../src/panel/api.ts";
@@ -15,6 +15,23 @@ const MESSAGES: Msg[] = [
   { id: "m4", role: "assistant", text: "neue Antwort", createdAt: 4 },
 ];
 
+const FALLBACK = "Session-Entwurf nicht verfügbar – Entwurf vom Small Model.";
+
+const ok = (body: unknown): GuestRequestResult => ({ status: 200, body: JSON.stringify(body) });
+
+/** A fake service: POST starts, GET answers with the polls in order (the last one repeats). */
+function fakeService(polls: { state: string; text?: string; sessionStatus: string }[]) {
+  const queue = [...polls];
+  return (req: GuestRequest): GuestRequestResult => {
+    if (req.method === "POST") return ok({ started: true });
+    const next = queue.length > 1 ? queue.shift()! : queue[0]!;
+    return ok(next);
+  };
+}
+
+const sessionReply = (logId: string) =>
+  `Hier der Eintrag:\n${JSON.stringify({ logId, title: "Aus der Session", summary: "Session-Zusammenfassung.", hours: 1.5 })}`;
+
 type Gen = string | Error;
 
 function setup(opts: {
@@ -27,6 +44,10 @@ function setup(opts: {
   create?: () => string | Error;
   setBindingError?: Error;
   setProject?: () => Promise<void>;
+  /** The extension's service; by default there is none (`NO_SERVICE`). */
+  service?: (req: GuestRequest) => GuestRequestResult | Error;
+  now?: () => Date;
+  ids?: string[];
 } = {}) {
   const calls = {
     create: [] as { projectId: string; title: string; notes: string }[],
@@ -38,6 +59,7 @@ function setup(opts: {
     clearBinding: [] as string[],
     toast: [] as { kind: string; message: string }[],
     close: 0,
+    service: [] as GuestRequest[],
   };
   const tasks = opts.tasks ?? [
     { id: "t1", title: "Login-Bug", notesExcerpt: "" },
@@ -90,6 +112,12 @@ function setup(opts: {
   };
   const host: HostLike = {
     request: async () => ({ status: 200, body: "{}" }) as never,
+    serviceRequest: async (req) => {
+      calls.service.push(req);
+      const r = opts.service?.(req) ?? new HostRequestError("NO_SERVICE", "no service");
+      if (r instanceof Error) throw r;
+      return r;
+    },
     storage: { get: async () => undefined, set: async () => {}, delete: async () => {} },
     generate: async (req) => {
       calls.generate.push(req);
@@ -104,10 +132,151 @@ function setup(opts: {
       calls.close++;
     },
   };
-  const flow = createFlow({ api, store, host, now: () => new Date(2026, 10, 17, 12) });
+  const ids = [...(opts.ids ?? ["log-1", "log-2", "log-3"])];
+  const flow = createFlow({
+    api,
+    store,
+    host,
+    now: opts.now ?? (() => new Date(2026, 10, 17, 12)),
+    newId: () => ids.shift() ?? "log-x",
+    sleep: () => new Promise((r) => setTimeout(r, 0)),
+  });
   const item = { sessionId: "s1", sessionTitle: "Session A", directory: "/repo" as string | null, messages: MESSAGES };
   return { flow, calls, item };
 }
+
+describe("flow: session draft", () => {
+  test("flow: uses session draft", async () => {
+    const { flow, calls, item } = setup({
+      service: fakeService([
+        { state: "pending", sessionStatus: "busy" },
+        { state: "done", text: sessionReply("log-1"), sessionStatus: "idle" },
+      ]),
+      generate: [JSON.stringify({ taskId: "t1", reason: "gleich" })],
+    });
+    await flow.start(item);
+    expect(flow.state.phase).toBe("ready");
+    expect(flow.state.draft).toEqual({ title: "Aus der Session", summary: "Session-Zusammenfassung.", hours: 1.5 });
+    expect(flow.state.target).toBe("t1");
+    expect(flow.state.message).toBeNull();
+    // generate only matched against the SP tasks
+    expect(calls.generate).toHaveLength(1);
+    expect(calls.generate[0]!.prompt).toContain("Login-Bug");
+    const post = calls.service[0]!;
+    expect(post.method).toBe("POST");
+    expect(post.path).toBe("/draft");
+    const body = JSON.parse(post.body!);
+    expect(body.sessionId).toBe("s1");
+    expect(body.logId).toBe("log-1");
+    expect(body.prompt).toContain("[SP-Log-Anfrage log-1]");
+    expect(calls.service[1]).toMatchObject({ method: "GET", path: "/draft", query: { sessionId: "s1", logId: "log-1" } });
+  });
+
+  test("flow: falls back without service", async () => {
+    const { flow, calls, item } = setup();
+    await flow.start(item);
+    expect(flow.state.phase).toBe("ready");
+    expect(flow.state.draft).toEqual({ title: "Login gefixt", summary: "Token-Refresh repariert.", hours: 2.5 });
+    expect(calls.generate).toHaveLength(2);
+    expect(flow.state.message).toContain(FALLBACK);
+  });
+
+  test("flow: falls back on http error", async () => {
+    const { flow, calls, item } = setup({ service: () => ({ status: 502, body: '{"error":"NO_SESSION"}' }) });
+    await flow.start(item);
+    expect(flow.state.draft.title).toBe("Login gefixt");
+    expect(calls.generate).toHaveLength(2);
+    expect(flow.state.message).toContain(FALLBACK);
+  });
+
+  test("flow: falls back on failed and invalid draft", async () => {
+    for (const poll of [
+      { state: "failed", sessionStatus: "unknown" },
+      { state: "done", text: sessionReply("other-log"), sessionStatus: "idle" },
+    ]) {
+      const { flow, item } = setup({ service: fakeService([poll]) });
+      await flow.start(item);
+      expect(flow.state.draft.title).toBe("Login gefixt");
+      expect(flow.state.message).toContain(FALLBACK);
+    }
+  });
+
+  test("flow: falls back on timeout", async () => {
+    let t = new Date(2026, 10, 17, 12).getTime();
+    const now = () => {
+      t += 60_000; // every look at the clock is a minute later
+      return new Date(t);
+    };
+    const { flow, calls, item } = setup({ now, service: fakeService([{ state: "pending", sessionStatus: "busy" }]) });
+    await flow.start(item);
+    expect(flow.state.phase).toBe("ready");
+    expect(flow.state.draft.title).toBe("Login gefixt");
+    expect(flow.state.message).toContain(FALLBACK);
+    const gets = calls.service.filter((r) => r.method === "GET").length;
+    expect(gets).toBeGreaterThan(3);
+    expect(gets).toBeLessThanOrEqual(10);
+  });
+
+  test("flow: busy message", async () => {
+    const { flow, item } = setup({
+      service: fakeService([
+        { state: "pending", sessionStatus: "busy" },
+        { state: "done", text: sessionReply("log-1"), sessionStatus: "idle" },
+      ]),
+    });
+    const messages: (string | null)[] = [];
+    flow.subscribe((s) => messages.push(s.message));
+    await flow.start(item);
+    expect(messages).toContain("Session erstellt Entwurf …");
+    expect(messages).toContain("Wartet, bis die Session frei ist …");
+  });
+
+  test("flow: waiting message", async () => {
+    const { flow, item } = setup({
+      service: fakeService([
+        { state: "pending", sessionStatus: "waiting" },
+        { state: "done", text: sessionReply("log-1"), sessionStatus: "idle" },
+      ]),
+    });
+    const messages: (string | null)[] = [];
+    flow.subscribe((s) => messages.push(s.message));
+    await flow.start(item);
+    expect(messages).toContain("Session wartet auf deine Eingabe – bitte dort antworten.");
+    expect(flow.state.draft.title).toBe("Aus der Session");
+  });
+
+  test("flow: restart cancels polling", async () => {
+    const { flow, calls, item } = setup({
+      service: (req) => {
+        if (req.method === "POST") return ok({ started: true });
+        if (req.query?.logId === "log-2") return ok({ state: "done", text: sessionReply("log-2"), sessionStatus: "idle" });
+        return ok({ state: "pending", sessionStatus: "busy" });
+      },
+    });
+    const first = flow.start(item);
+    while (!calls.service.some((r) => r.method === "GET")) await new Promise((r) => setTimeout(r, 0));
+    await flow.start({ ...item, sessionId: "s2" });
+    await first;
+    const firstGets = () => calls.service.filter((r) => r.query?.logId === "log-1").length;
+    const before = firstGets();
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(firstGets()).toBe(before);
+    expect(flow.state.draft.title).toBe("Aus der Session");
+    expect(flow.state.phase).toBe("ready");
+  });
+
+  test("flow: cancel stops polling", async () => {
+    const { flow, calls, item } = setup({ service: fakeService([{ state: "pending", sessionStatus: "busy" }]) });
+    const run = flow.start(item);
+    while (!calls.service.some((r) => r.method === "GET")) await new Promise((r) => setTimeout(r, 0));
+    flow.cancel();
+    await run;
+    const before = calls.service.length;
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(calls.service.length).toBe(before);
+    expect(calls.generate).toHaveLength(0);
+  });
+});
 
 describe("flow", () => {
   test("flow: first run asks project", async () => {
@@ -153,7 +322,7 @@ describe("flow", () => {
     const prompt = calls.generate[0]!.prompt;
     expect(prompt).toContain("NEUE-ARBEIT");
     expect(prompt).not.toContain("ALTE-ARBEIT");
-    expect(flow.state.message).toBeNull();
+    expect(flow.state.message).toBe(FALLBACK);
     expect(flow.state.phase).toBe("ready");
   });
 
@@ -165,7 +334,8 @@ describe("flow", () => {
     expect(prompt).toContain("NEUE-ARBEIT");
     expect(flow.state.phase).toBe("ready");
     expect(flow.state.message).toBe(
-      "Hinweis: Letzter Log-Stand nicht gefunden – Schätzung umfasst möglicherweise bereits geloggte Arbeit. Bitte Stunden prüfen.",
+      FALLBACK +
+        " Hinweis: Letzter Log-Stand nicht gefunden – Schätzung umfasst möglicherweise bereits geloggte Arbeit. Bitte Stunden prüfen.",
     );
   });
 

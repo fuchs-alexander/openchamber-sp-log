@@ -13,6 +13,8 @@ import type { MatchCandidate } from "../log/match.ts";
 /** The part of `connectHost()` the panel uses; a fake is enough in tests. */
 export interface HostLike {
   request(request: GuestRequest): Promise<GuestRequestResult>;
+  /** A request to this extension's own service (`contributes.service`). */
+  serviceRequest(request: GuestRequest): Promise<GuestRequestResult>;
   storage: {
     get(key: string, options?: GuestStorageOptions): Promise<JsonValue | undefined>;
     set(key: string, value: JsonValue, options?: GuestStorageOptions): Promise<void>;
