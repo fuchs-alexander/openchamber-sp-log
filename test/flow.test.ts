@@ -25,6 +25,8 @@ function setup(opts: {
   generate?: Gen[];
   append?: (taskId: string) => string | Error;
   create?: () => string | Error;
+  setBindingError?: Error;
+  setProject?: () => Promise<void>;
 } = {}) {
   const calls = {
     create: [] as { projectId: string; title: string; notes: string }[],
@@ -73,10 +75,12 @@ function setup(opts: {
     setProject: async (dir, id) => {
       calls.setProject.push({ dir, id });
       projects.set(dir, id);
+      await opts.setProject?.();
     },
     getBinding: async () => binding,
     setBinding: async (sessionId, b) => {
       calls.setBinding.push({ sessionId, b });
+      if (opts.setBindingError) throw opts.setBindingError;
       binding = b;
     },
     clearBinding: async (sessionId) => {
@@ -134,7 +138,7 @@ describe("flow", () => {
   });
 
   test("flow: bound session skips match", async () => {
-    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "m2" } });
+    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2 } });
     await flow.start(item);
     expect(calls.generate).toHaveLength(1);
     expect(flow.state.target).toBe("t1");
@@ -143,9 +147,60 @@ describe("flow", () => {
     expect(prompt).not.toContain("ALTE-ARBEIT");
   });
 
+  test("flow: missing lastMessageId falls back to createdAt", async () => {
+    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "gone", lastCreatedAt: 2 } });
+    await flow.start(item);
+    const prompt = calls.generate[0]!.prompt;
+    expect(prompt).toContain("NEUE-ARBEIT");
+    expect(prompt).not.toContain("ALTE-ARBEIT");
+    expect(flow.state.message).toBeNull();
+    expect(flow.state.phase).toBe("ready");
+  });
+
+  test("flow: lost log point estimates all and warns", async () => {
+    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "gone", lastCreatedAt: null } });
+    await flow.start(item);
+    const prompt = calls.generate[0]!.prompt;
+    expect(prompt).toContain("ALTE-ARBEIT");
+    expect(prompt).toContain("NEUE-ARBEIT");
+    expect(flow.state.phase).toBe("ready");
+    expect(flow.state.message).toBe(
+      "Hinweis: Letzter Log-Stand nicht gefunden – Schätzung umfasst möglicherweise bereits geloggte Arbeit. Bitte Stunden prüfen.",
+    );
+  });
+
+  test("flow: binding save failure warns but finishes", async () => {
+    const { flow, calls, item } = setup({ setBindingError: new Error("STORAGE") });
+    await flow.start(item);
+    await flow.save();
+    expect(calls.create).toHaveLength(1);
+    expect(calls.toast).toEqual([
+      {
+        kind: "error",
+        message: "Geloggt, aber Session-Bindung konnte nicht gespeichert werden – beim nächsten Log Stunden prüfen.",
+      },
+    ]);
+    expect(flow.state.phase).toBe("done");
+    expect(calls.close).toBe(1);
+  });
+
+  test("flow: chooseProject enters drafting before storage resolves", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { flow, item } = setup({ setProject: () => gate });
+    await flow.start(item);
+    expect(flow.state.phase).toBe("ready");
+    const pending = flow.chooseProject("p1");
+    expect(flow.state.phase).toBe("drafting");
+    void flow.chooseProject("p1"); // ignored: not in pick-project/ready
+    release();
+    await pending;
+    expect(flow.state.phase).toBe("ready");
+  });
+
   test("flow: stale binding", async () => {
     const { flow, calls, item } = setup({
-      binding: { taskId: "t1", lastMessageId: "m2" },
+      binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2 },
       tasks: [{ id: "t2", title: "Doku", notesExcerpt: "" }],
     });
     await flow.start(item);
@@ -193,7 +248,7 @@ describe("flow", () => {
     expect(calls.create[0]!.notes).toBe(
       "### 2026-11-17 · Login gefixt · ≈ 2,5 h\nToken-Refresh repariert.\n\n<sub>OpenChamber: Session A</sub>",
     );
-    expect(calls.setBinding).toEqual([{ sessionId: "s1", b: { taskId: "new1", lastMessageId: "m4" } }]);
+    expect(calls.setBinding).toEqual([{ sessionId: "s1", b: { taskId: "new1", lastMessageId: "m4", lastCreatedAt: 4 } }]);
     expect(calls.toast).toEqual([{ kind: "success", message: "In Super Productivity geloggt" }]);
     expect(calls.close).toBe(1);
     expect(flow.state.phase).toBe("done");
@@ -208,7 +263,7 @@ describe("flow", () => {
     expect(calls.append).toHaveLength(1);
     expect(calls.append[0]!.taskId).toBe("t2");
     expect(calls.append[0]!.text).toStartWith("### 2026-11-17 · Anders · ≈ 1 h\n");
-    expect(calls.setBinding[0]!.b).toEqual({ taskId: "t2", lastMessageId: "m4" });
+    expect(calls.setBinding[0]!.b).toEqual({ taskId: "t2", lastMessageId: "m4", lastCreatedAt: 4 });
   });
 
   test("flow: append task-gone", async () => {

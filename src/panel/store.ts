@@ -1,15 +1,21 @@
 import type { HostLike } from "./api.ts";
 
-export type Binding = { taskId: string; lastMessageId: string | null };
+export type Binding = { taskId: string; lastMessageId: string | null; lastCreatedAt: number | null };
 
 const OPTS = { scope: "instance" } as const;
 
 function asBinding(value: unknown): Binding | null {
   if (!value || typeof value !== "object") return null;
-  const { taskId, lastMessageId } = value as { taskId?: unknown; lastMessageId?: unknown };
+  const { taskId, lastMessageId, lastCreatedAt } = value as {
+    taskId?: unknown;
+    lastMessageId?: unknown;
+    lastCreatedAt?: unknown;
+  };
   if (typeof taskId !== "string") return null;
   if (lastMessageId !== null && typeof lastMessageId !== "string") return null;
-  return { taskId, lastMessageId };
+  // Bindings written before lastCreatedAt existed lack the field.
+  const createdAt = typeof lastCreatedAt === "number" && Number.isFinite(lastCreatedAt) ? lastCreatedAt : null;
+  return { taskId, lastMessageId, lastCreatedAt: createdAt };
 }
 
 export function createStore(host: HostLike) {
@@ -25,7 +31,7 @@ export function createStore(host: HostLike) {
       return asBinding(await host.storage.get(`session:${sessionId}`, OPTS));
     },
     async setBinding(sessionId: string, b: Binding): Promise<void> {
-      await host.storage.set(`session:${sessionId}`, { taskId: b.taskId, lastMessageId: b.lastMessageId }, OPTS);
+      await host.storage.set(`session:${sessionId}`, { taskId: b.taskId, lastMessageId: b.lastMessageId, lastCreatedAt: b.lastCreatedAt }, OPTS);
     },
     async clearBinding(sessionId: string): Promise<void> {
       await host.storage.delete(`session:${sessionId}`, OPTS);

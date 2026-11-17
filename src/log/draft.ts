@@ -10,10 +10,15 @@ const MAX_SUMMARY_CHARS = 4000;
 const MAX_HOURS = 24;
 const TRUNCATION_MARK = " …[gekürzt]";
 
-export function messagesSince(messages: Msg[], lastMessageId: string | null): Msg[] {
-  if (lastMessageId === null) return messages.slice();
-  const index = messages.findIndex((m) => m.id === lastMessageId);
-  return index === -1 ? messages.slice() : messages.slice(index + 1);
+/**
+ * Messages after the last logged point: after `lastMessageId` when it is still in the
+ * snapshot, otherwise those newer than `lastCreatedAt`, otherwise all messages.
+ */
+export function messagesSince(messages: Msg[], lastMessageId: string | null, lastCreatedAt?: number | null): Msg[] {
+  const index = lastMessageId === null ? -1 : messages.findIndex((m) => m.id === lastMessageId);
+  if (index !== -1) return messages.slice(index + 1);
+  if (typeof lastCreatedAt === "number") return messages.filter((m) => m.createdAt > lastCreatedAt);
+  return messages.slice();
 }
 
 function serializeMessage(m: Msg, text = m.text): string {

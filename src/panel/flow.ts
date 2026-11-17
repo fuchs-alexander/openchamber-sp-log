@@ -35,6 +35,9 @@ const TEXT = {
   saveFailed: "Speichern fehlgeschlagen. Der Entwurf bleibt erhalten – bitte erneut versuchen.",
   loadFailed: "Super Productivity ist gerade nicht erreichbar.",
   logged: "In Super Productivity geloggt",
+  logPointLost:
+    "Hinweis: Letzter Log-Stand nicht gefunden – Schätzung umfasst möglicherweise bereits geloggte Arbeit. Bitte Stunden prüfen.",
+  bindingFailed: "Geloggt, aber Session-Bindung konnte nicht gespeichert werden – beim nächsten Log Stunden prüfen.",
 };
 
 const isDisconnected = (err: unknown): boolean => err instanceof GatewayError && err.code === "disconnected";
@@ -53,7 +56,7 @@ export function createFlow(deps: { api: Api; store: Store; host: HostLike; now: 
   let item: FlowItem | null = null;
   let directory = "global";
   let binding: Binding | null = null;
-  let draftPromise: Promise<{ draft: Draft; failed: boolean }> | null = null;
+  let draftPromise: Promise<{ draft: Draft; failed: boolean; logPointLost: boolean }> | null = null;
   let draftApplied = false;
 
   function set(patch: Partial<FlowState>): void {
@@ -66,14 +69,19 @@ export function createFlow(deps: { api: Api; store: Store; host: HostLike; now: 
     else set({ phase: "error", message: TEXT.loadFailed });
   }
 
-  function ensureDraft(): Promise<{ draft: Draft; failed: boolean }> {
+  function ensureDraft(): Promise<{ draft: Draft; failed: boolean; logPointLost: boolean }> {
     if (!draftPromise) {
       const current = item!;
-      const since = messagesSince(current.messages, binding?.lastMessageId ?? null);
+      const lastId = binding?.lastMessageId ?? null;
+      const lastCreatedAt = binding?.lastCreatedAt ?? null;
+      const since = messagesSince(current.messages, lastId, lastCreatedAt);
+      // A logged point existed but neither its id nor its timestamp can locate it any more.
+      const logPointLost =
+        lastId !== null && lastCreatedAt === null && !current.messages.some((m) => m.id === lastId);
       draftPromise = host
         .generate(buildDraftRequest(since, current.sessionTitle))
-        .then((res) => ({ draft: parseDraft(res.text), failed: false }))
-        .catch(() => ({ draft: EMPTY_DRAFT, failed: true }));
+        .then((res) => ({ draft: parseDraft(res.text), failed: false, logPointLost }))
+        .catch(() => ({ draft: EMPTY_DRAFT, failed: true, logPointLost }));
     }
     return draftPromise;
   }
@@ -92,7 +100,7 @@ export function createFlow(deps: { api: Api; store: Store; host: HostLike; now: 
   async function loadProject(run: number, projectId: string, initial: boolean): Promise<void> {
     set({ phase: "drafting", projectId, message: null });
     let tasks: MatchCandidate[];
-    let drafted: { draft: Draft; failed: boolean };
+    let drafted: { draft: Draft; failed: boolean; logPointLost: boolean };
     try {
       [tasks, drafted] = await Promise.all([api.tasks(projectId), ensureDraft()]);
     } catch (err) {
@@ -101,11 +109,12 @@ export function createFlow(deps: { api: Api; store: Store; host: HostLike; now: 
     }
     if (run !== runId) return;
 
-    let message: string | null = null;
+    const notes: string[] = [];
     if (!draftApplied) {
       draftApplied = true;
       set({ draft: drafted.draft });
-      if (drafted.failed) message = TEXT.draftFailed;
+      if (drafted.logPointLost) notes.push(TEXT.logPointLost);
+      if (drafted.failed) notes.push(TEXT.draftFailed);
     }
 
     let target: Target;
@@ -119,14 +128,14 @@ export function createFlow(deps: { api: Api; store: Store; host: HostLike; now: 
           binding = null;
           await store.clearBinding(sessionId).catch(() => {});
           if (run !== runId) return;
-          message = TEXT.staleBinding;
+          notes.push(TEXT.staleBinding);
         }
       }
     } else {
       target = await suggestTarget(state.draft, tasks);
       if (run !== runId) return;
     }
-    set({ phase: "ready", tasks, target, message });
+    set({ phase: "ready", tasks, target, message: notes.length > 0 ? notes.join(" ") : null });
   }
 
   async function start(next: FlowItem): Promise<void> {
@@ -165,6 +174,8 @@ export function createFlow(deps: { api: Api; store: Store; host: HostLike; now: 
     if (state.phase !== "pick-project" && state.phase !== "ready") return;
     const run = runId;
     const initial = state.phase === "pick-project";
+    // Leave pick-project/ready before awaiting storage so a second choice is ignored.
+    set({ phase: "drafting", projectId: id, message: null });
     await store.setProject(directory, id).catch(() => {});
     if (run !== runId) return;
     await loadProject(run, id, initial);
@@ -210,9 +221,16 @@ export function createFlow(deps: { api: Api; store: Store; host: HostLike; now: 
 
     const last = current.messages[current.messages.length - 1];
     const lastMessageId = last?.id ?? binding?.lastMessageId ?? null;
-    binding = { taskId, lastMessageId };
-    await store.setBinding(current.sessionId, binding).catch(() => {});
-    await host.toast({ kind: "success", message: TEXT.logged }).catch(() => {});
+    const lastCreatedAt = last?.createdAt ?? binding?.lastCreatedAt ?? null;
+    binding = { taskId, lastMessageId, lastCreatedAt };
+    const bound = await store.setBinding(current.sessionId, binding).then(
+      () => true,
+      () => false,
+    );
+    const toast = bound
+      ? ({ kind: "success", message: TEXT.logged } as const)
+      : ({ kind: "error", message: TEXT.bindingFailed } as const);
+    await host.toast(toast).catch(() => {});
     if (run === runId) set({ phase: "done", message: null });
     await host.close().catch(() => {});
   }
