@@ -7,9 +7,25 @@ export const SINCE_HINT_MAX = 200;
 export const GIT_RULES = [
   "Du darfst ausschließlich lesende Git-Befehle im Projektverzeichnis ausführen, um den Umfang einzuschätzen: git status, git diff --stat, git diff --shortstat, git log --stat / --oneline (auch mit --since/--author), git show --stat. Keine anderen Tools, keine schreibenden oder netzwerkbezogenen Git-Befehle (kein commit, checkout, switch, reset, stash, pull, fetch, push, merge, rebase).",
   "Betrachte die Commits und nicht committeten Änderungen, die im genannten Zeitraum in dieser Session entstanden sind, auch durch ihre Subagenten. Commits, die von anderen stammen und nur hereingeholt wurden (nicht in dieser Session erstellt), zählen nicht.",
+  "Eine Aufgabe besteht oft aus mehreren Commits: betrachte alle Commits dieser Session seit der Grenze (nicht nur den letzten) plus nicht committete Änderungen. Miss den Gesamtumfang über den ganzen Bereich (z. B. git log --since=<Zeitpunkt> --stat und git diff --stat <ältester Commit>^..HEAD bzw. gegen den Stand vor der Grenze); eine mehrfach geänderte Datei zählt nur einmal. Schätze den Gesamtumfang, nicht pro Commit, und beschreibe in der Zusammenfassung das Ergebnis der Aufgabe als Ganzes, nicht Commit für Commit.",
   "Nutze die Größe der Änderungen (berührte Dateien, geänderte Zeilen) zusammen mit dem Gesprächsverlauf als Grundlage für die Stunden. Richtwerte nach Umfang: minimal (1 Datei, wenige Zeilen) 0.5–1h, klein (1–3 Dateien) 1–3h, mittel (4–8 Dateien) 4–8h, umfangreich (8–15 Dateien) 8–16h, groß (15+ Dateien) 16–32h; generierte Dateien (dist/, Lockfiles, Bundles) nicht mitzählen; Tests und Doku zählen als Aufwand.",
   "Schreibe keine Dateilisten oder Commit-Hashes in Titel oder Zusammenfassung. Ist das Projektverzeichnis kein Git-Repository, schätze allein aus dem Gesprächsverlauf.",
 ].join("\n");
+
+const pad = (n: number): string => String(n).padStart(2, "0");
+
+/**
+ * `ms` as ISO 8601 with a UTC offset, e.g. 2026-11-17T19:43:00+01:00 (for git log --since).
+ * `offsetMinutes` east of UTC; default: the local offset at that time.
+ */
+export function formatSinceTime(ms: number, offsetMinutes: number = -new Date(ms).getTimezoneOffset()): string {
+  const d = new Date(ms + offsetMinutes * 60_000);
+  const date = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+  const time = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+  const abs = Math.abs(offsetMinutes);
+  const offset = `${offsetMinutes < 0 ? "-" : "+"}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+  return `${date}T${time}${offset}`;
+}
 
 function scope(sinceLogId: string | null, sinceMessageHint: string | null): string {
   if (sinceLogId) return `Berücksichtige nur Arbeit nach der Anfrage [SP-Log-Anfrage ${sinceLogId}] in dieser Session.`;
@@ -22,11 +38,20 @@ function scope(sinceLogId: string | null, sinceMessageHint: string | null): stri
  * The message sent into the logged session, asking its own agent for the draft.
  * `sinceLogId` is the request whose draft was last saved; without it,
  * `sinceMessageHint` quotes the last logged message (a log from before session drafts).
+ * `sinceTime` (ms): when the boundary was, named for `git log --since`;
+ * `offsetMinutes` overrides the local UTC offset (tests).
  */
-export function buildSessionDraftPrompt(logId: string, sinceLogId: string | null, sinceMessageHint: string | null = null): string {
+export function buildSessionDraftPrompt(
+  logId: string,
+  sinceLogId: string | null,
+  sinceMessageHint: string | null = null,
+  sinceTime: number | null = null,
+  offsetMinutes?: number,
+): string {
+  const time = sinceTime === null ? "" : ` Zeitpunkt der Grenze: ${formatSinceTime(sinceTime, offsetMinutes)} (für git log --since).`;
   return [
     `[SP-Log-Anfrage ${logId}]`,
-    `Erstelle einen Arbeitslog-Eintrag für die Arbeit in dieser Session. ${scope(sinceLogId, sinceMessageHint)}`,
+    `Erstelle einen Arbeitslog-Eintrag für die Arbeit in dieser Session. ${scope(sinceLogId, sinceMessageHint)}${time}`,
     "",
     GIT_RULES,
     "",

@@ -142,7 +142,7 @@ export function createFlow(deps: {
    * to the work after the last saved log. "unavailable" or "waiting": the Small
    * Model drafts instead. "aborted": the run was replaced or cancelled meanwhile.
    */
-  async function sessionDraft(run: number, current: FlowItem, since: { logId: string | null; hint: string | null }): Promise<SessionDrafted> {
+  async function sessionDraft(run: number, current: FlowItem, since: { logId: string | null; hint: string | null; time: number | null }): Promise<SessionDrafted> {
     const sessionId = current.sessionId;
     const resume = current.resume ?? null;
     const logId = resume?.logId ?? newId();
@@ -155,7 +155,7 @@ export function createFlow(deps: {
       // Kept before sending, so a frame unmounted meanwhile still finds it.
       if (remember) await pending!.set(sessionId, { logId, startedAt, directory: current.directory || null }).catch(() => {});
       try {
-        await drafts.start(sessionId, logId, buildSessionDraftPrompt(logId, since.logId, since.hint));
+        await drafts.start(sessionId, logId, buildSessionDraftPrompt(logId, since.logId, since.hint, since.time));
       } catch (err) {
         await forget();
         if (run !== runId) return "aborted";
@@ -201,12 +201,13 @@ export function createFlow(deps: {
    * for a binding from before 0.2.0, after the bound message (quoted). `lost`:
    * a binding exists but its message is gone, so the whole session is drafted.
    */
-  function sessionDraftSince(current: FlowItem): { logId: string | null; hint: string | null; lost: boolean } {
-    if (!binding) return { logId: null, hint: null, lost: false };
-    if (binding.lastLogId) return { logId: binding.lastLogId, hint: null, lost: false };
+  function sessionDraftSince(current: FlowItem): { logId: string | null; hint: string | null; time: number | null; lost: boolean } {
+    if (!binding) return { logId: null, hint: null, time: current.messages[0]?.createdAt ?? null, lost: false };
+    const time = binding.logs?.at(-1)?.at ?? binding.lastCreatedAt ?? null;
+    if (binding.lastLogId) return { logId: binding.lastLogId, hint: null, time, lost: false };
     const lastId = binding.lastMessageId;
     const text = current.messages.find((m) => m.id === lastId)?.text.trim();
-    return text ? { logId: null, hint: text, lost: false } : { logId: null, hint: null, lost: true };
+    return text ? { logId: null, hint: text, time, lost: false } : { logId: null, hint: null, time, lost: true };
   }
 
   /** The Small Model's draft from the messages since the last logged point. */

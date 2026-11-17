@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { SESSION_WORK_RULES, WORK_RULES } from "../src/log/draft.ts";
-import { buildSessionDraftPrompt, parseSessionDraft } from "../src/log/session-draft.ts";
+import { buildSessionDraftPrompt, formatSinceTime, parseSessionDraft } from "../src/log/session-draft.ts";
 
 describe("buildSessionDraftPrompt", () => {
   const prompt = buildSessionDraftPrompt("L1", null);
@@ -181,5 +181,48 @@ describe("parseSessionDraft: JSON fallback", () => {
       summary: "S",
       hours: null,
     });
+  });
+});
+
+describe("multi-commit estimate", () => {
+  const prompt = buildSessionDraftPrompt("L1", null);
+
+  test("asks to consider all commits since the boundary plus uncommitted changes", () => {
+    expect(prompt).toContain("Eine Aufgabe besteht oft aus mehreren Commits");
+    expect(prompt).toContain("betrachte alle Commits dieser Session seit der Grenze (nicht nur den letzten) plus nicht committete Änderungen");
+    expect(prompt).toContain("git log --since=<Zeitpunkt> --stat");
+    expect(prompt).toContain("git diff --stat <ältester Commit>^..HEAD");
+    expect(prompt).toContain("eine mehrfach geänderte Datei zählt nur einmal");
+    expect(prompt).toContain("Schätze den Gesamtumfang, nicht pro Commit");
+    expect(prompt).toContain("das Ergebnis der Aufgabe als Ganzes, nicht Commit für Commit");
+  });
+
+  test("keeps the allowed/forbidden command lists and the no-hashes rule", () => {
+    expect(prompt).toContain("git log --stat / --oneline (auch mit --since/--author)");
+    expect(prompt).toContain("(kein commit, checkout, switch, reset, stash, pull, fetch, push, merge, rebase)");
+    expect(prompt).toMatch(/keine Dateilisten oder Commit-Hashes/);
+  });
+
+  test("without sinceTime there is no boundary time", () => {
+    expect(prompt).not.toContain("Zeitpunkt der Grenze");
+  });
+
+  test("with sinceTime the scope line names the boundary in ISO 8601 with local offset", () => {
+    const at = Date.UTC(2026, 10, 17, 18, 43);
+    const p = buildSessionDraftPrompt("L2", "L1", null, at, 60);
+    const scopeLine = p.split("\n")[1]!;
+    expect(scopeLine).toContain("Berücksichtige nur Arbeit nach der Anfrage [SP-Log-Anfrage L1]");
+    expect(scopeLine).toContain("Zeitpunkt der Grenze: 2026-11-17T19:43:00+01:00 (für git log --since).");
+  });
+});
+
+describe("formatSinceTime", () => {
+  const at = Date.UTC(2026, 10, 17, 18, 43, 5);
+  test("positive offset", () => expect(formatSinceTime(at, 60)).toBe("2026-11-17T19:43:05+01:00"));
+  test("negative half-hour offset crossing the day", () => expect(formatSinceTime(Date.UTC(2026, 0, 1, 2, 0), -210)).toBe("2025-12-31T22:30:00-03:30"));
+  test("zero offset", () => expect(formatSinceTime(at, 0)).toBe("2026-11-17T18:43:05+00:00"));
+  test("defaults to the local offset", () => {
+    const off = -new Date(at).getTimezoneOffset();
+    expect(formatSinceTime(at)).toBe(formatSinceTime(at, off));
   });
 });

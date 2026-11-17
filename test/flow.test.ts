@@ -5,6 +5,7 @@ import type { MatchCandidate } from "../src/log/match.ts";
 import { GatewayError, type Api, type BoundTask, type HostLike, type SaveResult, type SpProject } from "../src/panel/api.ts";
 import type { Binding, Store } from "../src/panel/store.ts";
 import { createFlow } from "../src/panel/flow.ts";
+import { formatSinceTime } from "../src/log/session-draft.ts";
 
 const DRAFT_JSON = JSON.stringify({ title: "Login gefixt", summary: "Token-Refresh repariert.", hours: 2.5 });
 
@@ -864,5 +865,42 @@ describe("flow: review fixes", () => {
     await flow.save();
     expect(flow.state.phase).toBe("done");
     expect(calls.close).toBe(0);
+  });
+});
+
+describe("flow: sinceTime for the multi-commit estimate", () => {
+  const boundary = (p: string) => p.match(/Zeitpunkt der Grenze: (\S+) \(für git log --since\)\./)?.[1] ?? null;
+
+  test("bound session: the time of the last saved log", async () => {
+    const { flow, calls, item } = setup({
+      service: answeringService,
+      binding: {
+        taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: "old-log", taskTitle: null, projectTitle: null,
+        logs: [{ at: 1000, hours: 1 }, { at: 5_000_000, hours: 2 }],
+      },
+    });
+    await flow.start(item);
+    expect(boundary(promptOf(calls.service[0]!))).toBe(formatSinceTime(5_000_000));
+  });
+
+  test("bound session without logs: lastCreatedAt", async () => {
+    const { flow, calls, item } = setup({
+      service: answeringService,
+      binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: null, ...LEGACY },
+    });
+    await flow.start(item);
+    expect(boundary(promptOf(calls.service[0]!))).toBe(formatSinceTime(2));
+  });
+
+  test("unbound session: createdAt of the first message", async () => {
+    const { flow, calls, item } = setup({ service: answeringService });
+    await flow.start({ ...item, messages: [{ ...MESSAGES[0]!, createdAt: 7_000 }, ...MESSAGES.slice(1)] });
+    expect(boundary(promptOf(calls.service[0]!))).toBe(formatSinceTime(7_000));
+  });
+
+  test("status surface without binding and messages: no boundary time", async () => {
+    const { flow, calls, item } = setup({ service: answeringService });
+    await flow.start({ ...item, messages: [] });
+    expect(promptOf(calls.service[0]!)).not.toContain("Zeitpunkt der Grenze");
   });
 });
