@@ -16,6 +16,18 @@ const MESSAGES: Msg[] = [
 ];
 
 const FALLBACK = "Session-Entwurf nicht verfügbar – Entwurf vom Small Model.";
+const WAITING_FALLBACK = "Session wartet auf deine Eingabe – Entwurf vom Small Model.";
+const WORKING = "Session arbeitet – Entwurf folgt, sobald sie fertig ist …";
+const LOG_POINT_LOST =
+  "Hinweis: Letzter Log-Stand nicht gefunden – Schätzung umfasst möglicherweise bereits geloggte Arbeit. Bitte Stunden prüfen.";
+
+/** A service whose session answers every request at once with a draft for its logId. */
+const answeringService = (req: GuestRequest): GuestRequestResult =>
+  req.method === "POST"
+    ? ok({ started: true })
+    : ok({ state: "done", text: sessionReply(req.query!.logId!), sessionStatus: "idle" });
+
+const promptOf = (req: GuestRequest): string => JSON.parse(req.body!).prompt;
 
 const ok = (body: unknown): GuestRequestResult => ({ status: 200, body: JSON.stringify(body) });
 
@@ -227,8 +239,9 @@ describe("flow: session draft", () => {
     const messages: (string | null)[] = [];
     flow.subscribe((s) => messages.push(s.message));
     await flow.start(item);
-    expect(messages).toContain("Session erstellt Entwurf …");
-    expect(messages).toContain("Wartet, bis die Session frei ist …");
+    expect(messages).toContain(WORKING);
+    expect(messages).not.toContain("Wartet, bis die Session frei ist …");
+    expect(messages).not.toContain("Session erstellt Entwurf …");
   });
 
   test("flow: waiting message", async () => {
@@ -276,6 +289,117 @@ describe("flow: session draft", () => {
     expect(calls.service.length).toBe(before);
     expect(calls.generate).toHaveLength(0);
   });
+
+  test("flow: waiting session falls back without sending", async () => {
+    const { flow, calls, item } = setup({
+      service: (req) => (req.method === "POST" ? { status: 409, body: '{"error":"session-waiting"}' } : ok({ state: "pending", sessionStatus: "idle" })),
+    });
+    await flow.start(item);
+    expect(flow.state.phase).toBe("ready");
+    expect(flow.state.draft.title).toBe("Login gefixt");
+    expect(flow.state.message).toContain(WAITING_FALLBACK);
+    expect(flow.state.message).not.toContain(FALLBACK);
+    expect(calls.service.filter((r) => r.method === "GET")).toHaveLength(0);
+  });
+
+  test("flow: poll host timeout keeps polling", async () => {
+    let gets = 0;
+    const { flow, item } = setup({
+      service: (req) => {
+        if (req.method === "POST") return ok({ started: true });
+        gets++;
+        if (gets <= 2) return { status: 504, body: '{"error":"host-timeout"}' };
+        return ok({ state: "done", text: sessionReply("log-1"), sessionStatus: "idle" });
+      },
+    });
+    await flow.start(item);
+    expect(gets).toBe(3);
+    expect(flow.state.draft.title).toBe("Aus der Session");
+    expect(flow.state.message).toBeNull();
+  });
+
+  test("flow: start host timeout falls back", async () => {
+    const { flow, item } = setup({ service: () => ({ status: 504, body: '{"error":"host-timeout"}' }) });
+    await flow.start(item);
+    expect(flow.state.draft.title).toBe("Login gefixt");
+    expect(flow.state.message).toContain(FALLBACK);
+  });
+
+  test("flow: unbound session drafts the whole session", async () => {
+    const { flow, calls, item } = setup({ service: answeringService });
+    await flow.start(item);
+    expect(promptOf(calls.service[0]!)).toContain("die ganze Session");
+  });
+
+  test("flow: binding from 0.1.0 limits the draft to work after the logged message", async () => {
+    const { flow, calls, item } = setup({
+      service: answeringService,
+      binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: null },
+    });
+    await flow.start(item);
+    const prompt = promptOf(calls.service[0]!);
+    expect(prompt).toContain('Berücksichtige nur Arbeit nach dieser Nachricht: "alte Antwort"');
+    expect(prompt).not.toContain("die ganze Session");
+    expect(flow.state.draft.title).toBe("Aus der Session");
+    expect(flow.state.message).toBeNull();
+  });
+
+  test("flow: binding from 0.1.0 with a lost message warns to check the hours", async () => {
+    const { flow, calls, item } = setup({
+      service: answeringService,
+      binding: { taskId: "t1", lastMessageId: "gone", lastCreatedAt: null, lastLogId: null },
+    });
+    await flow.start(item);
+    const prompt = promptOf(calls.service[0]!);
+    expect(prompt).not.toContain("Berücksichtige nur Arbeit nach");
+    expect(flow.state.draft.title).toBe("Aus der Session");
+    expect(flow.state.message).toBe(LOG_POINT_LOST);
+  });
+
+  test("flow: three saved logs in one session, a cancelled draft does not move the boundary", async () => {
+    const more = (n: number): Msg[] =>
+      Array.from({ length: n }, (_, i) => ({ id: `m${i + 1}`, role: i % 2 ? "assistant" : "user", text: `Nachricht ${i + 1}`, createdAt: i + 1 }) as Msg);
+    const { flow, calls, item } = setup({
+      service: answeringService,
+      tasks: [{ id: "new1", title: "Aus der Session", notesExcerpt: "" }],
+      generate: [JSON.stringify({ taskId: null, reason: "" })],
+      ids: ["log-1", "log-2", "log-3", "log-4"],
+    });
+    const posts = () => calls.service.filter((r) => r.method === "POST");
+
+    // log 1: no binding, whole session
+    await flow.start({ ...item, messages: more(4) });
+    expect(promptOf(posts()[0]!)).toContain("die ganze Session");
+    flow.setTarget("new");
+    await flow.save();
+    expect(calls.create).toHaveLength(1);
+    expect(calls.setBinding.at(-1)!.b).toEqual({ taskId: "new1", lastMessageId: "m4", lastCreatedAt: 4, lastLogId: "log-1" });
+
+    // log 2: after log-1, appended to the bound task
+    await flow.start({ ...item, messages: more(6) });
+    const p2 = promptOf(posts()[1]!);
+    expect(p2).toContain("Berücksichtige nur Arbeit nach der Anfrage [SP-Log-Anfrage log-1]");
+    expect(flow.state.target).toBe("new1");
+    await flow.save();
+    expect(calls.append.map((a) => a.taskId)).toEqual(["new1"]);
+    expect(calls.setBinding.at(-1)!.b).toEqual({ taskId: "new1", lastMessageId: "m6", lastCreatedAt: 6, lastLogId: "log-2" });
+
+    // cancelled: drafted (log-3) but never saved
+    await flow.start({ ...item, messages: more(8) });
+    expect(flow.state.phase).toBe("ready");
+    flow.cancel();
+    expect(calls.setBinding).toHaveLength(2);
+
+    // log 3: still after log-2
+    await flow.start({ ...item, messages: more(10) });
+    const p3 = promptOf(posts()[3]!);
+    expect(p3).toContain("Berücksichtige nur Arbeit nach der Anfrage [SP-Log-Anfrage log-2]");
+    expect(p3).not.toContain("log-1");
+    expect(p3).not.toContain("log-3");
+    await flow.save();
+    expect(calls.append.map((a) => a.taskId)).toEqual(["new1", "new1"]);
+    expect(calls.setBinding.at(-1)!.b).toEqual({ taskId: "new1", lastMessageId: "m10", lastCreatedAt: 10, lastLogId: "log-4" });
+  });
 });
 
 describe("flow", () => {
@@ -307,7 +431,7 @@ describe("flow", () => {
   });
 
   test("flow: bound session skips match", async () => {
-    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2 } });
+    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: null } });
     await flow.start(item);
     expect(calls.generate).toHaveLength(1);
     expect(flow.state.target).toBe("t1");
@@ -317,7 +441,7 @@ describe("flow", () => {
   });
 
   test("flow: missing lastMessageId falls back to createdAt", async () => {
-    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "gone", lastCreatedAt: 2 } });
+    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "gone", lastCreatedAt: 2, lastLogId: null } });
     await flow.start(item);
     const prompt = calls.generate[0]!.prompt;
     expect(prompt).toContain("NEUE-ARBEIT");
@@ -327,7 +451,7 @@ describe("flow", () => {
   });
 
   test("flow: lost log point estimates all and warns", async () => {
-    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "gone", lastCreatedAt: null } });
+    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "gone", lastCreatedAt: null, lastLogId: null } });
     await flow.start(item);
     const prompt = calls.generate[0]!.prompt;
     expect(prompt).toContain("ALTE-ARBEIT");
@@ -370,7 +494,7 @@ describe("flow", () => {
 
   test("flow: stale binding", async () => {
     const { flow, calls, item } = setup({
-      binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2 },
+      binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: null },
       tasks: [{ id: "t2", title: "Doku", notesExcerpt: "" }],
     });
     await flow.start(item);
@@ -418,7 +542,7 @@ describe("flow", () => {
     expect(calls.create[0]!.notes).toBe(
       "### 2026-11-17 · Login gefixt · ≈ 2,5 h\nToken-Refresh repariert.\n\n<sub>OpenChamber: Session A</sub>",
     );
-    expect(calls.setBinding).toEqual([{ sessionId: "s1", b: { taskId: "new1", lastMessageId: "m4", lastCreatedAt: 4 } }]);
+    expect(calls.setBinding).toEqual([{ sessionId: "s1", b: { taskId: "new1", lastMessageId: "m4", lastCreatedAt: 4, lastLogId: null } }]);
     expect(calls.toast).toEqual([{ kind: "success", message: "In Super Productivity geloggt" }]);
     expect(calls.close).toBe(1);
     expect(flow.state.phase).toBe("done");
@@ -433,7 +557,7 @@ describe("flow", () => {
     expect(calls.append).toHaveLength(1);
     expect(calls.append[0]!.taskId).toBe("t2");
     expect(calls.append[0]!.text).toStartWith("### 2026-11-17 · Anders · ≈ 1 h\n");
-    expect(calls.setBinding[0]!.b).toEqual({ taskId: "t2", lastMessageId: "m4", lastCreatedAt: 4 });
+    expect(calls.setBinding[0]!.b).toEqual({ taskId: "t2", lastMessageId: "m4", lastCreatedAt: 4, lastLogId: null });
   });
 
   test("flow: append task-gone", async () => {

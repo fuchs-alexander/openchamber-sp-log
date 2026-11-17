@@ -128,7 +128,7 @@ describe("store", () => {
     const { host, data, scopes } = fakeHost();
     const store = createStore(host);
     expect(await store.getBinding("s1")).toBeNull();
-    const b = { taskId: "t1", lastMessageId: "m9", lastCreatedAt: 1234 };
+    const b = { taskId: "t1", lastMessageId: "m9", lastCreatedAt: 1234, lastLogId: "L7" };
     await store.setBinding("s1", b);
     expect(await store.getBinding("s1")).toEqual(b);
     expect(data.has("session:s1")).toBe(true);
@@ -149,7 +149,7 @@ describe("store", () => {
   test("old binding without lastCreatedAt is read", async () => {
     const { host, data } = fakeHost();
     data.set("session:s1", { taskId: "t1", lastMessageId: "m9" });
-    expect(await createStore(host).getBinding("s1")).toEqual({ taskId: "t1", lastMessageId: "m9", lastCreatedAt: null });
+    expect(await createStore(host).getBinding("s1")).toEqual({ taskId: "t1", lastMessageId: "m9", lastCreatedAt: null, lastLogId: null });
   });
 
   test("malformed binding → null", async () => {

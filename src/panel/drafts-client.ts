@@ -7,13 +7,28 @@ export type DraftPoll = {
   sessionStatus: string;
 };
 
-/** A service call that did not work: no service, not granted, HTTP error or an unreadable answer. */
+/**
+ * A service call that did not work: no service, not granted, HTTP error or an unreadable answer.
+ * `reason` is the service's own `error` field, e.g. "session-waiting" or "host-timeout".
+ */
 export class DraftServiceError extends Error {
   code: string;
-  constructor(code: string) {
+  reason: string | null;
+  constructor(code: string, reason: string | null = null) {
     super(`draft service: ${code}`);
     this.name = "DraftServiceError";
     this.code = code;
+    this.reason = reason;
+  }
+}
+
+function errorReason(body: string): string | null {
+  try {
+    const data: unknown = JSON.parse(body);
+    const error = data && typeof data === "object" ? (data as { error?: unknown }).error : undefined;
+    return typeof error === "string" ? error : null;
+  } catch {
+    return null;
   }
 }
 
@@ -44,10 +59,10 @@ export function createDraftsClient(host: Pick<HostLike, "serviceRequest">) {
     try {
       res = await host.serviceRequest({ method, path: "/draft", query, body });
     } catch (err) {
-      const code = err && typeof err === "object" && typeof (err as { code?: unknown }).code === "string";
-      throw new DraftServiceError(code ? (err as { code: string }).code : "REQUEST_FAILED");
+      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+      throw new DraftServiceError(typeof code === "string" ? code : "REQUEST_FAILED");
     }
-    if (res.status >= 400) throw new DraftServiceError(`HTTP_${res.status}`);
+    if (res.status >= 400) throw new DraftServiceError(`HTTP_${res.status}`, errorReason(res.body));
     return res.body;
   }
 

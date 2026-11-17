@@ -3,17 +3,34 @@ import { WORK_RULES } from "../src/log/draft.ts";
 import { buildSessionDraftPrompt, parseSessionDraft } from "../src/log/session-draft.ts";
 
 describe("buildSessionDraftPrompt", () => {
-  const prompt = buildSessionDraftPrompt("L1");
+  const prompt = buildSessionDraftPrompt("L1", null);
 
   test("starts with the request marker and asks for the JSON with the logId", () => {
     expect(prompt.startsWith("[SP-Log-Anfrage L1]")).toBe(true);
     expect(prompt).toContain('"logId":"L1"');
     expect(prompt).toContain("Verwende keine Tools.");
+    expect(prompt).toContain(WORK_RULES);
   });
 
-  test("limits the work to the time since the last request and includes the rules", () => {
-    expect(prompt).toContain("seit der letzten [SP-Log-Anfrage");
-    expect(prompt).toContain(WORK_RULES);
+  test("without a saved log the whole session counts", () => {
+    expect(prompt).toContain("die ganze Session");
+    expect(prompt).not.toContain("seit der letzten");
+    expect(prompt).not.toContain("Berücksichtige nur Arbeit nach");
+  });
+
+  test("after a saved session draft only work after that request counts", () => {
+    const p = buildSessionDraftPrompt("L2", "L1");
+    expect(p).toContain("Berücksichtige nur Arbeit nach der Anfrage [SP-Log-Anfrage L1]");
+    expect(p).not.toContain("die ganze Session");
+  });
+
+  test("after a log without a request only work after the logged message counts", () => {
+    const long = "Fix den Login\n" + "x".repeat(300);
+    const p = buildSessionDraftPrompt("L2", null, long);
+    const expected = ("Fix den Login " + "x".repeat(300)).slice(0, 200);
+    expect(p).toContain(`Berücksichtige nur Arbeit nach dieser Nachricht: "${expected}"`);
+    expect(p).not.toContain("x".repeat(201));
+    expect(p).not.toContain("die ganze Session");
   });
 });
 

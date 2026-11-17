@@ -214,8 +214,31 @@ var CONTROLLERS = new Set(SURFACE_CONTROLLERS);
 // src/service/drafts.ts
 var DRAFT_TTL_MS = 15 * 60 * 1000;
 var IDLE_POLLS_MAX = 3;
+var HOST_TIMEOUT_MS = 8000;
+
+class SessionWaitingError extends Error {
+  constructor() {
+    super("session is waiting for input");
+    this.name = "SessionWaitingError";
+  }
+}
+
+class HostTimeoutError extends Error {
+  constructor() {
+    super("host call timed out");
+    this.name = "HostTimeoutError";
+  }
+}
 function createDrafts(deps) {
   const entries = new Map;
+  const hostTimeoutMs = deps.hostTimeoutMs ?? HOST_TIMEOUT_MS;
+  function limited(call) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new HostTimeoutError), hostTimeoutMs);
+    });
+    return Promise.race([call, timeout]).finally(() => clearTimeout(timer));
+  }
   function dropExpired() {
     const now = deps.now();
     for (const [logId, entry] of entries) {
@@ -226,14 +249,16 @@ function createDrafts(deps) {
   return {
     async start(input) {
       dropExpired();
-      const previousReply = await deps.sessions.lastReply(input.sessionId);
+      if (await limited(deps.sessions.status(input.sessionId)) === "waiting")
+        throw new SessionWaitingError;
+      const previousReply = await limited(deps.sessions.lastReply(input.sessionId));
       entries.set(input.logId, {
         sessionId: input.sessionId,
         previousReply,
         startedAt: deps.now(),
         idlePolls: 0
       });
-      await deps.sessions.send(input.sessionId, input.prompt);
+      await limited(deps.sessions.send(input.sessionId, input.prompt));
     },
     async poll(input) {
       dropExpired();
@@ -241,9 +266,9 @@ function createDrafts(deps) {
       if (!entry || entry.sessionId !== input.sessionId) {
         return { state: "failed", sessionStatus: "unknown" };
       }
-      const sessionStatus = await deps.sessions.status(input.sessionId);
-      const reply = await deps.sessions.lastReply(input.sessionId);
-      if (reply !== null && reply !== entry.previousReply && reply.includes(input.logId)) {
+      const sessionStatus = await limited(deps.sessions.status(input.sessionId));
+      const reply = await limited(deps.sessions.lastReply(input.sessionId));
+      if (sessionStatus === "idle" && reply !== null && reply !== entry.previousReply && reply.includes(input.logId)) {
         return { state: "done", text: reply, sessionStatus };
       }
       if (sessionStatus === "idle") {
@@ -305,6 +330,10 @@ function createHandler(deps) {
       }
       return json(404, { error: "NOT_FOUND" });
     } catch (error) {
+      if (error instanceof SessionWaitingError)
+        return json(409, { error: "session-waiting" });
+      if (error instanceof HostTimeoutError)
+        return json(504, { error: "host-timeout" });
       if (error instanceof ServiceHostError)
         return json(502, { error: error.code });
       return json(500, { error: "INTERNAL" });

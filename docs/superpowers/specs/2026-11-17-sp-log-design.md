@@ -186,19 +186,29 @@ anderer protokolliert. Was dabei herauskam:
   Server der jeweiligen Instanz) mit `sessionControl: { content: true }`.
 - Dienst-API, alle Aufrufe aus dem Dialog per `host.serviceRequest`; jeder
   einzelne Aufruf muss unter 20 s bleiben:
-  - `POST /draft {sessionId, prompt, logId}`: merkt sich vorher die letzte
-    Antwort der Session (`lastReply`) und schickt dann `sessions.send`. Die
-    Antwort ist `{started:true}`.
+  - `POST /draft {sessionId, prompt, logId}`: prüft zuerst den Status der
+    Session. Wartet sie auf eine Eingabe (`waiting`), sendet der Dienst nichts
+    (sonst würde die offene Frage geschlossen) und antwortet 409
+    `{error:'session-waiting'}`. Sonst merkt er sich die letzte Antwort der
+    Session (`lastReply`) und schickt dann `sessions.send`. Die Antwort ist
+    `{started:true}`.
   - `GET /draft?sessionId&logId`: liefert
     `{state:'pending'|'done'|'failed', text?, sessionStatus}`.
-    - `done`: `lastReply` enthält die `logId`.
+    - `done`: Die Session ist `idle` und `lastReply` enthält die `logId`
+      (solange sie arbeitet, kann die Antwort noch unvollständig sein).
     - `failed`: Die Session ist `idle`, aber nach 3 Abfragen ohne Treffer gibt
       es keine Antwort mit `logId`.
-- Der Dialog fragt alle 2 s nach, höchstens 10 Minuten lang. Ist die Session
-  beschäftigt, zeigt er „Wartet, bis die Session frei ist …“.
+  - Jeder Host-Aufruf des Dienstes hat ein eigenes Limit von 8 s. Läuft es ab,
+    antwortet der Dienst 504 `{error:'host-timeout'}`. Beim Nachfragen fragt der
+    Dialog dann einfach weiter, beim Start nimmt er den Rückfall.
+- Der Dialog fragt alle 2 s nach, höchstens 10 Minuten lang. Solange die
+  Session arbeitet, zeigt er „Session arbeitet – Entwurf folgt, sobald sie
+  fertig ist …“.
 - **Rückfall:** Nutzt die Session-Anfrage nicht, weil Dienst oder Berechtigung
   fehlen, ein Fehler auftritt oder die Zeit abläuft, entwirft das Small Model
-  mit demselben geschärften Regelwerk. Der Dialog weist darauf hin.
+  mit demselben geschärften Regelwerk. Der Dialog weist darauf hin; wartet die
+  Session auf eine Eingabe, mit „Session wartet auf deine Eingabe – Entwurf
+  vom Small Model.“
 - **Session-Prompt** (Deutsch), Kernregeln:
   - Nur Arbeit, die in dieser Session selbst geleistet wurde: umgesetzte
     Features, Fixes, Analysen, Entscheidungen, Konfiguration.
@@ -210,13 +220,19 @@ anderer protokolliert. Was dabei herauskam:
     - Commit-Hashes und Dateilisten
   - Besteht die Session nur aus Routine: kurzer Titel (z. B. „Deployment
     aktualisiert“), ein Satz, kleiner Aufwand.
-  - Nur Arbeit seit der letzten SP-Log-Anfrage in dieser Session.
+  - Nur Arbeit nach dem letzten **gespeicherten** Log: nach der
+    `[SP-Log-Anfrage <lastLogId>]`, deren Entwurf gespeichert wurde. Fehlt sie,
+    aber die Session ist gebunden (Log aus 0.1.0 oder per Small Model), nach der
+    gebundenen Nachricht (ihre ersten 200 Zeichen werden zitiert). Ohne Bindung
+    die ganze Session. Abgebrochene Anfragen verschieben die Grenze nicht.
   - Die Summary beschreibt das Ergebnis aus Sicht der Arbeit, nicht als
     Befehlsprotokoll.
   - Keine Tools verwenden.
   - Antwort ausschließlich als JSON:
     `{"logId": "<id>", "title", "summary", "hours"}`.
-- Die Bindung `lastMessageId` bleibt für den Rückfall erhalten.
+- Die Bindung `lastMessageId` bleibt für den Rückfall erhalten. Neu ist
+  `lastLogId`: die `logId` des gespeicherten Session-Entwurfs, `null` bei einem
+  Entwurf vom Small Model.
 - Der Abgleich mit SP-Aufgaben bleibt beim Small Model.
 - Die Version steigt auf `0.2.0`, damit installierte Instanzen das Update
   angeboten bekommen.

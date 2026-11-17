@@ -3,7 +3,7 @@ import { buildMatchRequest, parseMatch, type MatchCandidate } from "../log/match
 import { formatNoteBlock } from "../log/note.ts";
 import { buildSessionDraftPrompt, parseSessionDraft } from "../log/session-draft.ts";
 import { GatewayError, type Api, type HostLike, type SpProject } from "./api.ts";
-import { createDraftsClient } from "./drafts-client.ts";
+import { createDraftsClient, DraftServiceError } from "./drafts-client.ts";
 import type { Binding, Store } from "./store.ts";
 
 export type Phase = "disconnected" | "pick-project" | "drafting" | "ready" | "saving" | "done" | "error";
@@ -40,25 +40,32 @@ const TEXT = {
   logPointLost:
     "Hinweis: Letzter Log-Stand nicht gefunden – Schätzung umfasst möglicherweise bereits geloggte Arbeit. Bitte Stunden prüfen.",
   bindingFailed: "Geloggt, aber Session-Bindung konnte nicht gespeichert werden – beim nächsten Log Stunden prüfen.",
-  sessionDrafting: "Session erstellt Entwurf …",
-  sessionBusy: "Wartet, bis die Session frei ist …",
+  sessionWorking: "Session arbeitet – Entwurf folgt, sobald sie fertig ist …",
   sessionWaiting: "Session wartet auf deine Eingabe – bitte dort antworten.",
   sessionFallback: "Session-Entwurf nicht verfügbar – Entwurf vom Small Model.",
+  sessionWaitingFallback: "Session wartet auf deine Eingabe – Entwurf vom Small Model.",
 };
 
 /** How often and how long the panel asks the service for the session's draft. */
 export const DRAFT_POLL_MS = 2_000;
 export const DRAFT_WAIT_MS = 10 * 60 * 1000;
 
-type Drafted = { draft: Draft; failed: boolean; logPointLost: boolean; fallback: boolean };
+/**
+ * `fallback`: why the Small Model drafted instead of the session (null: the session drafted).
+ * `logId`: the session-draft request the draft came from; null for the Small Model.
+ */
+type Drafted = { draft: Draft; failed: boolean; logPointLost: boolean; fallback: string | null; logId: string | null };
+
+/** What the session-draft attempt gave: a draft, or why there is none. */
+type SessionDrafted = { draft: Draft; logId: string } | "unavailable" | "waiting" | "aborted";
 
 const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 function waitMessage(sessionStatus: string): string {
-  if (sessionStatus === "busy") return TEXT.sessionBusy;
-  if (sessionStatus === "waiting") return TEXT.sessionWaiting;
-  return TEXT.sessionDrafting;
+  return sessionStatus === "waiting" ? TEXT.sessionWaiting : TEXT.sessionWorking;
 }
+
+const hasReason = (err: unknown, reason: string): boolean => err instanceof DraftServiceError && err.reason === reason;
 
 const isDisconnected = (err: unknown): boolean => err instanceof GatewayError && err.code === "disconnected";
 
@@ -89,6 +96,8 @@ export function createFlow(deps: {
   let binding: Binding | null = null;
   let draftPromise: Promise<Drafted> | null = null;
   let draftApplied = false;
+  /** The session-draft request whose draft is in the dialog; null for a Small Model draft. */
+  let draftLogId: string | null = null;
 
   function set(patch: Partial<FlowState>): void {
     state = { ...state, ...patch };
@@ -101,33 +110,62 @@ export function createFlow(deps: {
   }
 
   /**
-   * Asks the logged session itself (through the service) for the draft.
-   * Null when it is not available: then the Small Model drafts instead.
-   * "aborted" when the run was replaced or cancelled meanwhile.
+   * Asks the logged session itself (through the service) for the draft, limited
+   * to the work after the last saved log. "unavailable" or "waiting": the Small
+   * Model drafts instead. "aborted": the run was replaced or cancelled meanwhile.
    */
-  async function sessionDraft(run: number, sessionId: string): Promise<Draft | null | "aborted"> {
+  async function sessionDraft(run: number, current: FlowItem, since: { logId: string | null; hint: string | null }): Promise<SessionDrafted> {
+    const sessionId = current.sessionId;
     const logId = newId();
     const deadline = now().getTime() + DRAFT_WAIT_MS;
     try {
-      await drafts.start(sessionId, logId, buildSessionDraftPrompt(logId));
+      await drafts.start(sessionId, logId, buildSessionDraftPrompt(logId, since.logId, since.hint));
+    } catch (err) {
+      if (run !== runId) return "aborted";
+      return hasReason(err, "session-waiting") ? "waiting" : "unavailable";
+    }
+    try {
       while (true) {
         if (run !== runId) return "aborted";
-        if (now().getTime() >= deadline) return null;
+        if (now().getTime() >= deadline) return "unavailable";
         await sleep(DRAFT_POLL_MS);
         if (run !== runId) return "aborted";
-        const poll = await drafts.poll(sessionId, logId);
+        let poll;
+        try {
+          poll = await drafts.poll(sessionId, logId);
+        } catch (err) {
+          // The host was slow this time; the session may still be drafting.
+          if (hasReason(err, "host-timeout")) continue;
+          throw err;
+        }
         if (run !== runId) return "aborted";
-        if (poll.state === "done") return parseSessionDraft(poll.text ?? "", logId);
-        if (poll.state === "failed") return null;
+        if (poll.state === "done") {
+          const draft = parseSessionDraft(poll.text ?? "", logId);
+          return draft ? { draft, logId } : "unavailable";
+        }
+        if (poll.state === "failed") return "unavailable";
         if (state.phase === "drafting") set({ message: waitMessage(poll.sessionStatus) });
       }
     } catch {
-      return run === runId ? null : "aborted";
+      return run === runId ? "unavailable" : "aborted";
     }
   }
 
+  /**
+   * Where the session draft starts: after the last saved session-draft request;
+   * for a binding from before 0.2.0, after the bound message (quoted). `lost`:
+   * a binding exists but its message is gone, so the whole session is drafted.
+   */
+  function sessionDraftSince(current: FlowItem): { logId: string | null; hint: string | null; lost: boolean } {
+    if (!binding) return { logId: null, hint: null, lost: false };
+    if (binding.lastLogId) return { logId: binding.lastLogId, hint: null, lost: false };
+    const lastId = binding.lastMessageId;
+    const text = current.messages.find((m) => m.id === lastId)?.text.trim();
+    return text ? { logId: null, hint: text, lost: false } : { logId: null, hint: null, lost: true };
+  }
+
   /** The Small Model's draft from the messages since the last logged point. */
-  function smallModelDraft(current: FlowItem): Promise<Drafted> {
+  function smallModelDraft(current: FlowItem, fallback: string): Promise<Drafted> {
     const lastId = binding?.lastMessageId ?? null;
     const lastCreatedAt = binding?.lastCreatedAt ?? null;
     const since = messagesSince(current.messages, lastId, lastCreatedAt);
@@ -135,18 +173,20 @@ export function createFlow(deps: {
     const logPointLost = lastId !== null && lastCreatedAt === null && !current.messages.some((m) => m.id === lastId);
     return host
       .generate(buildDraftRequest(since, current.sessionTitle))
-      .then((res) => ({ draft: parseDraft(res.text), failed: false, logPointLost, fallback: true }))
-      .catch(() => ({ draft: EMPTY_DRAFT, failed: true, logPointLost, fallback: true }));
+      .then((res) => ({ draft: parseDraft(res.text), failed: false, logPointLost, fallback, logId: null }))
+      .catch(() => ({ draft: EMPTY_DRAFT, failed: true, logPointLost, fallback, logId: null }));
   }
 
   function ensureDraft(run: number): Promise<Drafted> {
     if (!draftPromise) {
       const current = item!;
-      set({ message: TEXT.sessionDrafting });
-      draftPromise = sessionDraft(run, current.sessionId).then((draft) => {
-        if (draft === "aborted") return { draft: EMPTY_DRAFT, failed: false, logPointLost: false, fallback: false };
-        if (draft) return { draft, failed: false, logPointLost: false, fallback: false };
-        return smallModelDraft(current);
+      const since = sessionDraftSince(current);
+      set({ message: TEXT.sessionWorking });
+      draftPromise = sessionDraft(run, current, since).then((result) => {
+        if (result === "aborted") return { draft: EMPTY_DRAFT, failed: false, logPointLost: false, fallback: null, logId: null };
+        if (result === "waiting") return smallModelDraft(current, TEXT.sessionWaitingFallback);
+        if (result === "unavailable") return smallModelDraft(current, TEXT.sessionFallback);
+        return { draft: result.draft, failed: false, logPointLost: since.lost, fallback: null, logId: result.logId };
       });
     }
     return draftPromise;
@@ -178,8 +218,9 @@ export function createFlow(deps: {
     const notes: string[] = [];
     if (!draftApplied) {
       draftApplied = true;
+      draftLogId = drafted.logId;
       set({ draft: drafted.draft });
-      if (drafted.fallback) notes.push(TEXT.sessionFallback);
+      if (drafted.fallback) notes.push(drafted.fallback);
       if (drafted.logPointLost) notes.push(TEXT.logPointLost);
       if (drafted.failed) notes.push(TEXT.draftFailed);
     }
@@ -212,6 +253,7 @@ export function createFlow(deps: {
     binding = null;
     draftPromise = null;
     draftApplied = false;
+    draftLogId = null;
     state = initialState();
     set({});
 
@@ -294,7 +336,7 @@ export function createFlow(deps: {
     const last = current.messages[current.messages.length - 1];
     const lastMessageId = last?.id ?? binding?.lastMessageId ?? null;
     const lastCreatedAt = last?.createdAt ?? binding?.lastCreatedAt ?? null;
-    binding = { taskId, lastMessageId, lastCreatedAt };
+    binding = { taskId, lastMessageId, lastCreatedAt, lastLogId: draftLogId };
     const bound = await store.setBinding(current.sessionId, binding).then(
       () => true,
       () => false,

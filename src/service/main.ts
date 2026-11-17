@@ -5,7 +5,7 @@
 import { createServer } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { createServiceHost, ServiceHostError } from "@openchamber/sdk";
-import { createDrafts, type Drafts } from "./drafts.ts";
+import { createDrafts, HostTimeoutError, SessionWaitingError, type Drafts } from "./drafts.ts";
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 export const PROMPT_MAX = 8000;
@@ -55,6 +55,8 @@ export function createHandler(deps: { token: string; drafts: Drafts }): (req: Re
       }
       return json(404, { error: "NOT_FOUND" });
     } catch (error) {
+      if (error instanceof SessionWaitingError) return json(409, { error: "session-waiting" });
+      if (error instanceof HostTimeoutError) return json(504, { error: "host-timeout" });
       if (error instanceof ServiceHostError) return json(502, { error: error.code });
       return json(500, { error: "INTERNAL" });
     }

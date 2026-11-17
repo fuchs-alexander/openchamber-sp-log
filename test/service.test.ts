@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ServiceHostError } from "@openchamber/sdk";
-import { createDrafts, DRAFT_TTL_MS } from "../src/service/drafts.ts";
+import { createDrafts, DRAFT_TTL_MS, HostTimeoutError, SessionWaitingError } from "../src/service/drafts.ts";
 import { createHandler } from "../src/service/main.ts";
 
 type FakeSession = { status: string; reply: string | null };
@@ -74,6 +74,36 @@ describe("service drafts", () => {
     expect(await drafts.poll({ sessionId: "S1", logId: "L1" })).toEqual({ state: "failed", sessionStatus: "idle" });
   });
 
+  test("service: done only once the session is idle", async () => {
+    const { drafts, state } = setup({ status: "busy", reply: null });
+    await drafts.start({ sessionId: "S1", logId: "L1", prompt: "p" });
+    state.reply = '{"logId":"L1","title":"T","summ';
+    expect(await drafts.poll({ sessionId: "S1", logId: "L1" })).toEqual({ state: "pending", sessionStatus: "busy" });
+    state.status = "idle";
+    expect(await drafts.poll({ sessionId: "S1", logId: "L1" })).toEqual({
+      state: "done",
+      text: '{"logId":"L1","title":"T","summ',
+      sessionStatus: "idle",
+    });
+  });
+
+  test("service: does not send into a waiting session", async () => {
+    const { drafts, sent } = setup({ status: "waiting", reply: null });
+    await expect(drafts.start({ sessionId: "S1", logId: "L1", prompt: "p" })).rejects.toBeInstanceOf(SessionWaitingError);
+    expect(sent).toEqual([]);
+    expect((await drafts.poll({ sessionId: "S1", logId: "L1" })).state).toBe("failed");
+  });
+
+  test("service: host calls time out", async () => {
+    const never = () => new Promise<never>(() => {});
+    const drafts = createDrafts({
+      sessions: { send: never, status: never, lastReply: never },
+      now: () => 0,
+      hostTimeoutMs: 5,
+    });
+    await expect(drafts.start({ sessionId: "S1", logId: "L1", prompt: "p" })).rejects.toBeInstanceOf(HostTimeoutError);
+  });
+
   test("service: unknown logId", async () => {
     const { drafts } = setup();
     await drafts.start({ sessionId: "S1", logId: "L1", prompt: "p" });
@@ -136,6 +166,38 @@ describe("service http", () => {
     expect(await polled.json()).toEqual({ state: "pending", sessionStatus: "busy" });
 
     expect((await handler(req("/elsewhere"))).status).toBe(404);
+  });
+
+  test("service: waiting session answers 409", async () => {
+    const fake = setup({ status: "waiting", reply: null });
+    const handler = createHandler({ token: TOKEN, drafts: fake.drafts });
+    const res = await handler(req("/draft", { method: "POST", body: JSON.stringify({ sessionId: "S1", logId: "L1", prompt: "p" }) }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "session-waiting" });
+    expect(fake.sent).toEqual([]);
+  });
+
+  test("service: host timeout answers 504", async () => {
+    const fake = fakeSessions({ status: "busy", reply: null });
+    let hang = false;
+    const drafts = createDrafts({
+      sessions: {
+        ...fake.sessions,
+        status: (id) => (hang ? new Promise<never>(() => {}) : fake.sessions.status(id)),
+        lastReply: (id) => (hang ? new Promise<never>(() => {}) : fake.sessions.lastReply(id)),
+      },
+      now: () => 0,
+      hostTimeoutMs: 5,
+    });
+    const handler = createHandler({ token: TOKEN, drafts });
+    const ok = await handler(req("/draft", { method: "POST", body: JSON.stringify({ sessionId: "S1", logId: "L1", prompt: "p" }) }));
+    expect(ok.status).toBe(200);
+    hang = true;
+    const polled = await handler(req("/draft?sessionId=S1&logId=L1"));
+    expect(polled.status).toBe(504);
+    expect(await polled.json()).toEqual({ error: "host-timeout" });
+    const posted = await handler(req("/draft", { method: "POST", body: JSON.stringify({ sessionId: "S1", logId: "L2", prompt: "p" }) }));
+    expect(posted.status).toBe(504);
   });
 
   test("service: host errors become 502", async () => {

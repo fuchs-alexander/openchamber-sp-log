@@ -1,10 +1,24 @@
 import { draftFromJson, WORK_RULES, type Draft } from "./draft.ts";
 
-/** The message sent into the logged session, asking its own agent for the draft. */
-export function buildSessionDraftPrompt(logId: string): string {
+/** How much of a logged message the prompt quotes to mark where the last log ended. */
+export const SINCE_HINT_MAX = 200;
+
+function scope(sinceLogId: string | null, sinceMessageHint: string | null): string {
+  if (sinceLogId) return `Berücksichtige nur Arbeit nach der Anfrage [SP-Log-Anfrage ${sinceLogId}] in dieser Session.`;
+  const hint = sinceMessageHint?.replace(/\s+/g, " ").trim().slice(0, SINCE_HINT_MAX);
+  if (hint) return `Berücksichtige nur Arbeit nach dieser Nachricht: "${hint}"`;
+  return "Berücksichtige die ganze Session.";
+}
+
+/**
+ * The message sent into the logged session, asking its own agent for the draft.
+ * `sinceLogId` is the request whose draft was last saved; without it,
+ * `sinceMessageHint` quotes the last logged message (a log from before session drafts).
+ */
+export function buildSessionDraftPrompt(logId: string, sinceLogId: string | null, sinceMessageHint: string | null = null): string {
   return [
     `[SP-Log-Anfrage ${logId}]`,
-    "Erstelle einen Arbeitslog-Eintrag für die Arbeit in dieser Session. Berücksichtige nur Arbeit seit der letzten [SP-Log-Anfrage …] in dieser Session (gibt es keine, die ganze Session).",
+    `Erstelle einen Arbeitslog-Eintrag für die Arbeit in dieser Session. ${scope(sinceLogId, sinceMessageHint)}`,
     "Verwende keine Tools.",
     "",
     WORK_RULES,
