@@ -7,13 +7,14 @@
 <style>
   * { box-sizing: border-box; }
   html, body { margin: 0; background: transparent; color: var(--oc-fg); font-family: var(--oc-font, system-ui, sans-serif); font-size: 13px; }
-  #lines { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; }
-  #lines p { margin: 0; overflow-wrap: anywhere; }
+  #root { display: flex; flex-direction: column; gap: 8px; padding: 6px 8px; }
+  #root .lines { display: flex; flex-direction: column; gap: 2px; }
+  #root p { margin: 0; overflow-wrap: anywhere; }
   .muted { color: var(--oc-muted); font-size: 0.92em; }
 </style>
 </head>
 <body>
-<div id="lines" role="status"></div>
+<div id="root"></div>
 <script src="./main.js"></script>
 </body>
 </html>

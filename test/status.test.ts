@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { describeBinding } from "../src/status/describe.ts";
+import { describeBinding, logButtonLabel } from "../src/status/describe.ts";
 
 const NOW = new Date(2026, 10, 17, 15);
 const HINT = "Loggen: … → Export → Nach Super Productivity loggen";
@@ -51,5 +51,12 @@ describe("describeBinding", () => {
       "Logs: unbekannt (vor 0.3.0)",
       HINT,
     ]);
+  });
+});
+
+describe("logButtonLabel", () => {
+  test("no binding: Jetzt loggen; binding: Nachloggen", () => {
+    expect(logButtonLabel(null)).toBe("Jetzt loggen");
+    expect(logButtonLabel({ ...base, taskTitle: null, projectTitle: null, logs: null })).toBe("Nachloggen");
   });
 });

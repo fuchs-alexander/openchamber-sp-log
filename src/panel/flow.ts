@@ -24,6 +24,11 @@ export type FlowItem = {
   sessionTitle: string;
   directory: string | null;
   messages: Msg[];
+  /**
+   * Whether the Small Model may draft when the session cannot. Default: only
+   * with messages (the Work Status has none, so it shows an error instead).
+   */
+  allowFallback?: boolean;
 };
 
 const EMPTY_DRAFT: Draft = { title: "", summary: "", hours: null };
@@ -44,6 +49,7 @@ const TEXT = {
   sessionWaiting: "Session wartet auf deine Eingabe – bitte dort antworten.",
   sessionFallback: "Session-Entwurf nicht verfügbar – Entwurf vom Small Model.",
   sessionWaitingFallback: "Session wartet auf deine Eingabe – Entwurf vom Small Model.",
+  noSessionDraft: "Session-Entwurf nicht möglich – bitte über … → Export → Nach Super Productivity loggen.",
 };
 
 /** How often and how long the panel asks the service for the session's draft. */
@@ -54,7 +60,15 @@ export const DRAFT_WAIT_MS = 10 * 60 * 1000;
  * `fallback`: why the Small Model drafted instead of the session (null: the session drafted).
  * `logId`: the session-draft request the draft came from; null for the Small Model.
  */
-type Drafted = { draft: Draft; failed: boolean; logPointLost: boolean; fallback: string | null; logId: string | null };
+type Drafted = {
+  draft: Draft;
+  failed: boolean;
+  logPointLost: boolean;
+  fallback: string | null;
+  logId: string | null;
+  /** No session draft and the Small Model may not draft: the flow ends in an error. */
+  none?: boolean;
+};
 
 /** What the session-draft attempt gave: a draft, or why there is none. */
 type SessionDrafted = { draft: Draft; logId: string } | "unavailable" | "waiting" | "aborted";
@@ -184,8 +198,11 @@ export function createFlow(deps: {
       set({ message: TEXT.sessionWorking });
       draftPromise = sessionDraft(run, current, since).then((result) => {
         if (result === "aborted") return { draft: EMPTY_DRAFT, failed: false, logPointLost: false, fallback: null, logId: null };
-        if (result === "waiting") return smallModelDraft(current, TEXT.sessionWaitingFallback);
-        if (result === "unavailable") return smallModelDraft(current, TEXT.sessionFallback);
+        if (result === "waiting" || result === "unavailable") {
+          const allowFallback = current.allowFallback ?? current.messages.length > 0;
+          if (!allowFallback) return { draft: EMPTY_DRAFT, failed: true, logPointLost: false, fallback: null, logId: null, none: true };
+          return smallModelDraft(current, result === "waiting" ? TEXT.sessionWaitingFallback : TEXT.sessionFallback);
+        }
         return { draft: result.draft, failed: false, logPointLost: since.lost, fallback: null, logId: result.logId };
       });
     }
@@ -214,6 +231,10 @@ export function createFlow(deps: {
       return;
     }
     if (run !== runId) return;
+    if (drafted.none) {
+      set({ phase: "error", message: TEXT.noSessionDraft });
+      return;
+    }
 
     const notes: string[] = [];
     if (!draftApplied) {

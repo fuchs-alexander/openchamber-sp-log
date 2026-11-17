@@ -11,64 +11,14 @@
   h1 { font-size: 1.1em; margin: 0; }
   [hidden] { display: none !important; }
   .muted { color: var(--oc-muted); }
-  .field { display: flex; flex-direction: column; gap: 4px; }
-  .field > span { font-weight: 600; font-size: 0.9em; }
-  input, select, textarea {
-    width: 100%; min-height: 44px; padding: 8px 10px; font: inherit;
-    color: var(--oc-fg); background: var(--oc-elevated, var(--oc-bg));
-    border: 1px solid var(--oc-border); border-radius: var(--oc-radius, 6px);
-  }
-  textarea { min-height: 120px; resize: vertical; }
-  input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--oc-focus, var(--oc-primary)); outline-offset: 1px; }
-  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
-  button {
-    min-height: 44px; min-width: 44px; padding: 0 16px; font: inherit; font-weight: 600; cursor: pointer;
-    border-radius: var(--oc-radius, 6px); border: 1px solid var(--oc-border);
-    background: transparent; color: var(--oc-fg);
-  }
-  button.primary { background: var(--oc-primary); color: var(--oc-primary-fg); border-color: var(--oc-primary); flex: 1; }
-  button:disabled { opacity: 0.6; cursor: default; }
-  .notice { padding: 10px 12px; border-radius: var(--oc-radius, 6px); background: var(--oc-muted-surface, transparent); border: 1px solid var(--oc-border); }
-  .notice.warn { color: var(--oc-warning-text, var(--oc-fg)); border-color: var(--oc-warning, var(--oc-border)); }
-  .notice.ok { color: var(--oc-success-text, var(--oc-fg)); border-color: var(--oc-success, var(--oc-border)); }
+  p { margin: 0; }
 </style>
 </head>
 <body>
 <main>
   <h1>Nach Super Productivity loggen</h1>
-  <p id="status" class="muted" role="status"></p>
-  <p id="message" class="notice warn" role="alert" hidden></p>
-
-  <label id="project-field" class="field" hidden>
-    <span>SP-Projekt</span>
-    <select id="project"></select>
-  </label>
-
-  <div id="editor" hidden>
-    <div style="display:flex;flex-direction:column;gap:12px">
-      <label class="field">
-        <span>Ziel</span>
-        <select id="target"></select>
-      </label>
-      <label class="field">
-        <span>Titel</span>
-        <input id="title" type="text" maxlength="200" autocomplete="off">
-      </label>
-      <label class="field">
-        <span>Zusammenfassung</span>
-        <textarea id="summary" rows="6" maxlength="4000"></textarea>
-      </label>
-      <label class="field">
-        <span>Stunden (geschätzter Aufwand)</span>
-        <input id="hours" type="number" step="0.25" min="0" max="24" inputmode="decimal">
-      </label>
-    </div>
-  </div>
-
-  <div class="actions">
-    <button id="save" class="primary" type="button" hidden>Speichern</button>
-    <button id="cancel" type="button">Abbrechen</button>
-  </div>
+  <p id="hint" class="muted" role="status" hidden>Starte das Loggen über das Session-Menü: „Nach Super Productivity loggen“.</p>
+  <div id="flow"></div>
 </main>
 <script src="./main.js"></script>
 </body>

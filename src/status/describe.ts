@@ -40,3 +40,8 @@ export function describeBinding(binding: Binding | null, now: Date): { lines: st
   lines.push(HINT);
   return { lines };
 }
+
+/** The status button that starts logging the current session. */
+export function logButtonLabel(binding: Binding | null): string {
+  return binding ? "Nachloggen" : "Jetzt loggen";
+}

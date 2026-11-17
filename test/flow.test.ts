@@ -671,3 +671,46 @@ describe("flow: binding details", () => {
     expect(calls.setBinding[0]!.b).toMatchObject({ taskId: "t2", taskTitle: "Doku", projectTitle: "Projekt 1", logs: [{ at: AT, hours: 2.5 }] });
   });
 });
+
+describe("flow: without messages (Work Status)", () => {
+  const NO_DRAFT = "Session-Entwurf nicht möglich – bitte über … → Export → Nach Super Productivity loggen.";
+
+  test("no messages and no session draft: error, Small Model is not asked", async () => {
+    const { flow, calls, item } = setup();
+    await flow.start({ ...item, messages: [] });
+    expect(flow.state.phase).toBe("error");
+    expect(flow.state.message).toBe(NO_DRAFT);
+    expect(calls.generate).toHaveLength(0);
+  });
+
+  test("no messages and a waiting session: error, Small Model is not asked", async () => {
+    const { flow, calls, item } = setup({
+      service: (req) => (req.method === "POST" ? { status: 409, body: '{"error":"session-waiting"}' } : ok({ state: "pending", sessionStatus: "idle" })),
+    });
+    await flow.start({ ...item, messages: [] });
+    expect(flow.state.phase).toBe("error");
+    expect(flow.state.message).toBe(NO_DRAFT);
+    expect(calls.generate).toHaveLength(0);
+  });
+
+  test("allowFallback false forbids the Small Model even with messages", async () => {
+    const { flow, calls, item } = setup();
+    await flow.start({ ...item, allowFallback: false });
+    expect(flow.state.phase).toBe("error");
+    expect(flow.state.message).toBe(NO_DRAFT);
+    expect(calls.generate).toHaveLength(0);
+  });
+
+  test("no messages: the session draft works and saving keeps the bound message", async () => {
+    const { flow, calls, item } = setup({
+      service: answeringService,
+      binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: "old-log", ...LEGACY },
+    });
+    await flow.start({ ...item, messages: [] });
+    expect(flow.state.phase).toBe("ready");
+    expect(flow.state.draft.title).toBe("Aus der Session");
+    await flow.save();
+    expect(calls.setBinding[0]!.b).toMatchObject({ taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: "log-1" });
+    expect(flow.state.phase).toBe("done");
+  });
+});

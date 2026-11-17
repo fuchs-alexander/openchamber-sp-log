@@ -1,56 +1,85 @@
 import { connectHost } from "@openchamber/sdk";
 import { applyHostReady } from "@openchamber/sdk/ui";
+import { createApi } from "../panel/api.ts";
+import { createFlow } from "../panel/flow.ts";
 import { createStore } from "../panel/store.ts";
-import { describeBinding } from "./describe.ts";
+import { ensureStyles, renderFlow } from "../panel/view.ts";
+import { createStatusController, type StatusView } from "./controller.ts";
 
 const host = connectHost();
 const store = createStore(host);
-const list = document.getElementById("lines") as HTMLDivElement;
+// host.close() is a no-op in a status frame; the controller shows „Geloggt ✓“ instead.
+const flow = createFlow({ api: createApi(host), store, host, now: () => new Date() });
+const root = document.getElementById("root") as HTMLDivElement;
 
-let sessionId: string | null = null;
-/** Bumped on every refresh so a late read for an older session is dropped. */
-let generation = 0;
-
-function show(lines: string[]): void {
-  list.replaceChildren(
-    ...lines.map((text, i) => {
-      const p = document.createElement("p");
-      p.textContent = text;
-      if (i === lines.length - 1) p.className = "muted";
-      return p;
-    }),
-  );
+function reportHeight(): void {
   void host.setHeight(Math.ceil(document.body.scrollHeight)).catch(() => {});
 }
 
-async function refresh(): Promise<void> {
-  const run = ++generation;
-  if (!sessionId) {
-    show(["Keine Session geöffnet."]);
-    return;
-  }
-  const binding = await store.getBinding(sessionId).catch(() => null);
-  if (run !== generation) return;
-  show(describeBinding(binding, new Date()).lines);
+let flowView: { dispose: () => void } | null = null;
+
+function paragraph(text: string, className = ""): HTMLParagraphElement {
+  const p = document.createElement("p");
+  p.textContent = text;
+  if (className) p.className = className;
+  return p;
 }
 
-function setSession(id: string | null): void {
-  if (id === sessionId && list.childElementCount > 0) return;
-  sessionId = id;
-  void refresh();
+function render(view: StatusView): void {
+  if (view.mode === "flow") {
+    if (!flowView) flowView = renderFlow(root, flow, { compact: true, onCancel: () => ctrl.cancelLogging(), onRender: reportHeight });
+    return;
+  }
+  flowView?.dispose();
+  flowView = null;
+  if (view.mode === "logged") {
+    root.replaceChildren(paragraph("Geloggt ✓", "splog-notice ok"));
+  } else {
+    const lines = document.createElement("div");
+    lines.className = "lines";
+    lines.setAttribute("role", "status");
+    // The hint („Loggen: … → Export …“) is the last line, kept as secondary text.
+    lines.append(...view.lines.map((text, i) => paragraph(text, i === view.lines.length - 1 ? "muted" : "")));
+    const children: HTMLElement[] = [lines];
+    if (view.button) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "splog-btn primary";
+      button.textContent = view.button;
+      button.addEventListener("click", () => ctrl.startLogging());
+      children.push(button);
+    }
+    root.replaceChildren(...children);
+  }
+  reportHeight();
 }
+
+const ctrl = createStatusController({
+  flow,
+  store,
+  now: () => new Date(),
+  delay: (ms, fn) => {
+    const t = setTimeout(fn, ms);
+    return () => clearTimeout(t);
+  },
+  onChange: render,
+});
+
+ensureStyles();
 
 host.onReady((ctx) => {
   applyHostReady(ctx, document.documentElement);
-  setSession(ctx.session?.id ?? null);
+  ctrl.setDirectory(ctx.directory);
+  ctrl.setSession(ctx.session ? { id: ctx.session.id, title: ctx.session.title } : null);
 });
-host.onSession((session) => setSession(session?.id ?? null));
-// The service tells open frames when the dialog saved a log for a session.
+host.onDirectory((directory) => ctrl.setDirectory(directory));
+host.onSession((session) => ctrl.setSession(session ? { id: session.id, title: session.title } : null));
+// The service tells open frames when a log was saved for a session.
 host.onServiceEvent(({ topic, data }) => {
-  if (topic !== "logged" || !sessionId) return;
-  if (data && typeof data === "object" && !Array.isArray(data) && data.sessionId === sessionId) void refresh();
+  if (topic !== "logged") return;
+  if (data && typeof data === "object" && !Array.isArray(data) && typeof data.sessionId === "string") void ctrl.refresh();
 });
 // The binding changes in the log dialog; read it again when the section is shown again.
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") void refresh();
+  if (document.visibilityState === "visible") void ctrl.refresh();
 });
