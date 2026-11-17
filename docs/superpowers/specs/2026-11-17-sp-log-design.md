@@ -236,3 +236,58 @@ anderer protokolliert. Was dabei herauskam:
 - Der Abgleich mit SP-Aufgaben bleibt beim Small Model.
 - Die Version steigt auf `0.2.0`, damit installierte Instanzen das Update
   angeboten bekommen.
+
+## Nachtrag 2 (2026-11-17): Ordner, Sortierung, Übersicht und Seitenleiste
+
+Wünsche des Nutzers:
+- Projekte nach Namen sortiert.
+- SP-Ordner berücksichtigt.
+- Die Sitzungsübersicht (Work Status) und die Seitenleiste zeigen den Log-Stand.
+  Dazu gehören auch Sessions, die nicht geloggt sind.
+
+**Ordner:**
+- Die REST-API von SP kennt keine Ordner. Der Gateway liest den `menuTree.projectTree`
+  aus dem neuesten automatischen SP-Backup
+  (`~/.config/superProductivity/backups/*.json`, alle 5 Minuten neu, Cache nach
+  mtime).
+- `GET /projects` liefert zusätzlich `folder: string | null`, den Ordnerpfad mit
+  ` / ` als Trenner.
+- Fehlt ein Backup oder ist es unlesbar, kommt `folder: null`. Die Projekte werden
+  trotzdem geliefert.
+
+**Dialog:**
+- Die Projektauswahl ist nach Ordnern gruppiert (`<optgroup>`).
+- Ordner und Projekte sind jeweils alphabetisch sortiert (`localeCompare` mit `de`).
+- Projekte ohne Ordner stehen zuerst, ohne Gruppe.
+
+**Bindung:** Sie speichert zusätzlich `taskTitle`, `projectTitle` und
+`logs: {at, hours}[]`. Das Format bleibt abwärtskompatibel.
+
+**Work Status „SP Log“** (`statusSection`, auch am Handy). Für die aktuelle
+Session zeigt der Bereich:
+- **Geloggt:** gebundene Aufgabe und Projekt, Anzahl der Logs, den letzten Log mit
+  Datum und ≈ Stunden sowie die Summe der Stunden.
+- **Noch nicht geloggt:** „Noch nicht geloggt“.
+- **Immer:** den Hinweis „Loggen: … → Export → Nach Super Productivity loggen“.
+
+Den Log starten kann der Bereich nicht, weil der Gesprächsverlauf nur über die
+Session-Aktion kommt.
+
+**Seitenleiste:** Der Dienst setzt Markierungen (`marks`). Er läuft dauerhaft
+(`keepRunning`) und bekommt `sessionEvents: turn-finished` (ohne Inhalt). Pro
+Session gibt es einen Zustand:
+- **Geloggt und aktuell:** grünes Häkchen, Tooltip „SP: N Logs · ≈ X h“.
+- **Neue Arbeit seit dem letzten Log:** orangene Uhr, Tooltip „SP: neue Arbeit seit
+  Log am …“.
+- **Nie geloggt, aber mit abgeschlossener Agent-Arbeit:** graue Markierung, Tooltip
+  „SP: noch nicht geloggt“.
+
+Weitere Regeln:
+- Der Zustand liegt in `OPENCHAMBER_SERVICE_DATA_DIR`. Nach einem Neustart setzt
+  der Dienst die Markierungen erneut.
+- Der Dialog meldet einen gespeicherten Log per `POST /logged` an den Dienst.
+- Die SP-Log-Anfrage selbst erzeugt einen Turn, der nicht als neue Arbeit zählt.
+  Turns, die bis zum Speichern enden, setzen den Zustand zurück auf „aktuell“.
+- Sessions vor der Installation werden erst nach ihrem nächsten Turn markiert.
+
+Version `0.3.0` (enthält den Fix aus 0.2.1).
