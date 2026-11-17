@@ -147,7 +147,16 @@ eine Session-Aktion `log-session` („Nach Super Productivity loggen“) mit
 - **Einmalige GUI-Einrichtung:** über ein temporäres VNC nur auf der
   Tailscale-IP. Dabei werden SuperSync angemeldet, die Local REST API aktiviert
   und der Token erzeugt.
-- **Token-Dateien:** liegen unter `~/.config/sp-gateway/`, Modus 600.
+- **Token-Dateien:**
+  - Der SP-Token wird direkt aus `~/.config/superProductivity/local-rest-api-token`
+    gelesen. SP legt die Datei selbst an, und sie wird beim Neuerzeugen
+    aktualisiert.
+  - Der Gateway-Token liegt in `~/.config/sp-gateway/`, Modus 600.
+- **Stand 2026-11-17:**
+  - SP v20.0.0 ist mit SuperSync verbunden und entschlüsselt, die REST-API läuft.
+  - VNC und Debug-Zugänge sind wieder entfernt.
+  - Die GUI-Einrichtung lief per CDP (Remote-Debugging) und geschützter Eingabe,
+    weil VNC von macOS aus nicht funktionierte.
 
 ## Nicht enthalten
 
