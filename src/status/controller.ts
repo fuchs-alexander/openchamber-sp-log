@@ -36,6 +36,8 @@ export function createStatusController(deps: {
   /** Bumped on every refresh so a late read for an older session is dropped. */
   let generation = 0;
   let dropTimer: (() => void) | null = null;
+  /** The session's directory from its binding (the dialog's); wins over the Work Status directory. */
+  let boundDirectory: string | null = null;
 
   function show(next: StatusView): void {
     view = next;
@@ -52,11 +54,13 @@ export function createStatusController(deps: {
   async function refresh(): Promise<void> {
     const run = ++generation;
     const id = session?.id ?? null;
+    boundDirectory = null;
     if (!id) {
       summary = { mode: "summary", lines: ["Keine Session geöffnet."], button: null };
     } else {
       const binding = await store.getBinding(id).catch(() => null);
       if (run !== generation) return;
+      boundDirectory = binding?.directory ?? null;
       summary = { mode: "summary", lines: describeBinding(binding, now()).lines, button: logButtonLabel(binding) };
     }
     if (view.mode === "summary") show(summary);
@@ -97,7 +101,7 @@ export function createStatusController(deps: {
     startLogging(): void {
       if (!session || view.mode !== "summary") return;
       show({ mode: "flow" });
-      void flow.start({ sessionId: session.id, sessionTitle: session.title, directory, messages: [] });
+      void flow.start({ sessionId: session.id, sessionTitle: session.title, directory: boundDirectory ?? directory, messages: [] });
     },
     cancelLogging(): void {
       if (view.mode === "summary") return;

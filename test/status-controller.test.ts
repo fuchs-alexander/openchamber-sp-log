@@ -183,3 +183,23 @@ describe("status controller", () => {
     expect(view().mode).toBe("summary");
   });
 });
+
+describe("status controller: project directory", () => {
+  test("Nachloggen uses the directory saved in the binding", async () => {
+    const { ctrl, calls } = setup({ s1: { ...BOUND, directory: "/session/repo" } });
+    ctrl.setDirectory("/work-status");
+    ctrl.setSession({ id: "s1", title: "Session A" });
+    await tick();
+    ctrl.startLogging();
+    expect(calls.start[0]!.directory).toBe("/session/repo");
+  });
+
+  test("an old binding without directory falls back to the Work Status directory", async () => {
+    const { ctrl, calls } = setup({ s1: BOUND });
+    ctrl.setDirectory("/work-status");
+    ctrl.setSession({ id: "s1", title: "Session A" });
+    await tick();
+    ctrl.startLogging();
+    expect(calls.start[0]!.directory).toBe("/work-status");
+  });
+});

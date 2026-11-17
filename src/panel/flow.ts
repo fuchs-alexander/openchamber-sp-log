@@ -95,10 +95,13 @@ export function createFlow(deps: {
   /** A fresh id for every session-draft request. */
   newId?: () => string;
   sleep?: (ms: number) => Promise<void>;
+  /** Whether a save closes the frame (the dialog); default yes. The Work Status says no. */
+  closeOnDone?: () => boolean;
 }) {
   const { api, store, host, now } = deps;
   const newId = deps.newId ?? (() => crypto.randomUUID());
   const sleep = deps.sleep ?? sleepMs;
+  const closeOnDone = deps.closeOnDone ?? (() => true);
   const drafts = createDraftsClient(host);
   let state = initialState();
   const listeners = new Set<(s: FlowState) => void>();
@@ -362,7 +365,16 @@ export function createFlow(deps: {
     const projectTitle = state.projects.find((p) => p.id === projectId)?.title ?? null;
     // Bindings from before 0.3.0 have no log list; it starts with this save.
     const logs = [...(binding?.logs ?? []), { at: date.getTime(), hours }];
-    binding = { taskId, lastMessageId, lastCreatedAt, lastLogId: draftLogId, taskTitle, projectTitle, logs };
+    binding = {
+      taskId,
+      lastMessageId,
+      lastCreatedAt,
+      lastLogId: draftLogId,
+      taskTitle,
+      projectTitle,
+      logs,
+      directory: current.directory || null,
+    };
     const bound = await store.setBinding(current.sessionId, binding).then(
       () => true,
       () => false,
@@ -380,7 +392,7 @@ export function createFlow(deps: {
       : ({ kind: "error", message: TEXT.bindingFailed } as const);
     await host.toast(toast).catch(() => {});
     if (run === runId) set({ phase: "done", message: null });
-    await host.close().catch(() => {});
+    if (closeOnDone()) await host.close().catch(() => {});
   }
 
   return {

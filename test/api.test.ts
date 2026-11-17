@@ -136,6 +136,7 @@ describe("store", () => {
       taskTitle: "Aufgabe",
       projectTitle: "Projekt",
       logs: [{ at: 99, hours: 1.5 }],
+      directory: "/w/x",
     };
     await store.setBinding("s1", b);
     expect(await store.getBinding("s1")).toEqual(b);
@@ -165,6 +166,7 @@ describe("store", () => {
       taskTitle: null,
       projectTitle: null,
       logs: null,
+      directory: null,
     });
   });
 

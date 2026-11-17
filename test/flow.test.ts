@@ -63,6 +63,7 @@ function setup(opts: {
   service?: (req: GuestRequest) => GuestRequestResult | Error;
   now?: () => Date;
   ids?: string[];
+  closeOnDone?: () => boolean;
 } = {}) {
   const calls = {
     create: [] as { projectId: string; title: string; notes: string }[],
@@ -155,6 +156,7 @@ function setup(opts: {
     now: opts.now ?? (() => new Date(2026, 10, 17, 12)),
     newId: () => ids.shift() ?? "log-x",
     sleep: () => new Promise((r) => setTimeout(r, 0)),
+    closeOnDone: opts.closeOnDone,
   });
   const item = { sessionId: "s1", sessionTitle: "Session A", directory: "/repo" as string | null, messages: MESSAGES };
   return { flow, calls, item };
@@ -637,6 +639,7 @@ describe("flow: binding details", () => {
       taskTitle: "Login gefixt",
       projectTitle: "Projekt 1",
       logs: [{ at: AT, hours: 2.5 }],
+      directory: "/repo",
     });
   });
 
@@ -712,5 +715,38 @@ describe("flow: without messages (Work Status)", () => {
     await flow.save();
     expect(calls.setBinding[0]!.b).toMatchObject({ taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: "log-1" });
     expect(flow.state.phase).toBe("done");
+  });
+});
+
+describe("flow: review fixes", () => {
+  test("save stores the session's directory in the binding", async () => {
+    const { flow, calls, item } = setup();
+    await flow.start(item);
+    await flow.save();
+    expect(calls.setBinding[0]!.b.directory).toBe("/repo");
+  });
+
+  test("save without directory stores null", async () => {
+    const { flow, calls, item } = setup({ project: null });
+    await flow.start({ ...item, directory: null });
+    await flow.chooseProject("p1");
+    await flow.save();
+    expect(calls.setBinding[0]!.b.directory).toBeNull();
+  });
+
+  test("allowFallback true keeps the Small Model draft without messages (dialog)", async () => {
+    const { flow, calls, item } = setup();
+    await flow.start({ ...item, messages: [], allowFallback: true });
+    expect(flow.state.phase).toBe("ready");
+    expect(flow.state.draft.title).toBe("Login gefixt");
+    expect(calls.generate.length).toBeGreaterThan(0);
+  });
+
+  test("closeOnDone false: no host.close after save (Work Status)", async () => {
+    const { flow, calls, item } = setup({ closeOnDone: () => false });
+    await flow.start(item);
+    await flow.save();
+    expect(flow.state.phase).toBe("done");
+    expect(calls.close).toBe(0);
   });
 });

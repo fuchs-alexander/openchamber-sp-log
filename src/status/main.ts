@@ -8,8 +8,8 @@ import { createStatusController, type StatusView } from "./controller.ts";
 
 const host = connectHost();
 const store = createStore(host);
-// host.close() is a no-op in a status frame; the controller shows „Geloggt ✓“ instead.
-const flow = createFlow({ api: createApi(host), store, host, now: () => new Date() });
+// No host.close() in a status frame; the controller shows „Geloggt ✓“ instead.
+const flow = createFlow({ api: createApi(host), store, host, now: () => new Date(), closeOnDone: () => false });
 const root = document.getElementById("root") as HTMLDivElement;
 
 function reportHeight(): void {

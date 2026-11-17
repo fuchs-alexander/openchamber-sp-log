@@ -6,6 +6,8 @@ export type LogEntry = { at: number; hours: number };
 /**
  * `lastLogId`: the session-draft request whose draft was saved last; null after a Small Model draft or before 0.2.0.
  * `taskTitle`, `projectTitle`, `logs`: null for bindings written before 0.3.0.
+ * `directory`: the session's directory at the last save (for the project mapping
+ * in the Work Status); missing or null before 0.3.1.
  */
 export type Binding = {
   taskId: string;
@@ -15,6 +17,7 @@ export type Binding = {
   taskTitle: string | null;
   projectTitle: string | null;
   logs: LogEntry[] | null;
+  directory?: string | null;
 };
 
 const OPTS = { scope: "instance" } as const;
@@ -29,7 +32,7 @@ const isLogEntry = (v: unknown): v is LogEntry =>
 
 function asBinding(value: unknown): Binding | null {
   if (!value || typeof value !== "object") return null;
-  const { taskId, lastMessageId, lastCreatedAt, lastLogId, taskTitle, projectTitle, logs } = value as {
+  const { taskId, lastMessageId, lastCreatedAt, lastLogId, taskTitle, projectTitle, logs, directory } = value as {
     taskId?: unknown;
     lastMessageId?: unknown;
     lastCreatedAt?: unknown;
@@ -37,6 +40,7 @@ function asBinding(value: unknown): Binding | null {
     taskTitle?: unknown;
     projectTitle?: unknown;
     logs?: unknown;
+    directory?: unknown;
   };
   if (typeof taskId !== "string") return null;
   if (lastMessageId !== null && typeof lastMessageId !== "string") return null;
@@ -51,6 +55,7 @@ function asBinding(value: unknown): Binding | null {
     taskTitle: typeof taskTitle === "string" ? taskTitle : null,
     projectTitle: typeof projectTitle === "string" ? projectTitle : null,
     logs: Array.isArray(logs) ? logs.filter(isLogEntry).map((l) => ({ at: l.at, hours: l.hours })) : null,
+    directory: typeof directory === "string" ? directory : null,
   };
 }
 
@@ -75,6 +80,7 @@ export function createStore(host: HostLike) {
         taskTitle: b.taskTitle,
         projectTitle: b.projectTitle,
         logs: b.logs ? b.logs.map((l) => ({ at: l.at, hours: l.hours })) : null,
+        directory: b.directory ?? null,
       };
       await host.storage.set(`session:${sessionId}`, value, OPTS);
     },

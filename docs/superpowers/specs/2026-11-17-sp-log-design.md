@@ -270,8 +270,8 @@ Session zeigt der Bereich:
 - **Noch nicht geloggt:** „Noch nicht geloggt“.
 - **Immer:** den Hinweis „Loggen: … → Export → Nach Super Productivity loggen“.
 
-Den Log starten kann der Bereich nicht, weil der Gesprächsverlauf nur über die
-Session-Aktion kommt.
+~~Den Log starten kann der Bereich nicht, weil der Gesprächsverlauf nur über die
+Session-Aktion kommt.~~ Seit 0.3.1 kann er es, siehe Nachtrag 3.
 
 **Seitenleiste:** Der Dienst setzt Markierungen (`marks`). Er läuft dauerhaft
 (`keepRunning`) und bekommt `sessionEvents: turn-finished` (ohne Inhalt). Pro
@@ -291,3 +291,35 @@ Weitere Regeln:
 - Sessions vor der Installation werden erst nach ihrem nächsten Turn markiert.
 
 Version `0.3.0` (enthält den Fix aus 0.2.1).
+
+## Nachtrag 3 (2026-11-17): Loggen aus dem Work Status
+
+Wunsch des Nutzers: Ein Knopf im Bereich „SP Log“ soll die aktuelle Session loggen.
+
+- Der Knopf heißt „Jetzt loggen“, wenn die Session keine Bindung hat, sonst
+  „Nachloggen“. Er ist mindestens 44 px hoch und nutzt die Theme-Variablen des Hosts.
+  Der Hinweis „Loggen: … → Export → Nach Super Productivity loggen“ bleibt als
+  Nebentext.
+- Ein Klick startet denselben Ablauf wie der Dialog, **inline im Bereich** und
+  ohne neues Fenster. Die Darstellung ist mit dem Dialog geteilt (`src/panel/view.ts`).
+  Der Bereich passt seine Höhe nach jedem Zeichnen an (`setHeight`, der Host
+  begrenzt auf 24–480 px).
+- Der Bereich bekommt den Gesprächsverlauf nicht (`messages = []`). Den Entwurf
+  schreibt deshalb nur die Session selbst. **Es gibt keinen Rückfall auf das Small
+  Model.** Klappt der Session-Entwurf nicht, zeigt der Bereich: „Session-Entwurf
+  nicht möglich – bitte über … → Export → Nach Super Productivity loggen.“ Der
+  Dialog behält den Rückfall, auch ohne Nachrichten (`allowFallback: true`).
+- Die Projektzuordnung nutzt das Verzeichnis, das in der Bindung gespeichert ist.
+  Die Bindung speichert ab 0.3.1 beim Speichern zusätzlich `directory`. Fehlt es
+  (erster Log oder ältere Bindung), gilt das Verzeichnis des Work Status.
+- Nach dem Speichern zeigt der Bereich kurz „Geloggt ✓“ und dann wieder die
+  Übersicht mit der neu gelesenen Bindung. Er ruft kein `host.close()` auf; das
+  tut nur der Dialog.
+- „Abbrechen“ stoppt die Abfragen und zeigt wieder die Übersicht.
+- Wechselt die Session, während der Ablauf läuft, wird er abgebrochen, und der
+  Bereich zeigt die Übersicht der neuen Session.
+- Der Rahmen läuft nur, solange der Bereich aufgeklappt ist. Wird er während des
+  Entwurfs zugeklappt, endet der Ablauf. Die Anfrage an die Session ist dann
+  schon gesendet und bleibt im Verlauf stehen.
+
+Version `0.3.1`.
