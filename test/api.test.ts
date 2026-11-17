@@ -128,7 +128,15 @@ describe("store", () => {
     const { host, data, scopes } = fakeHost();
     const store = createStore(host);
     expect(await store.getBinding("s1")).toBeNull();
-    const b = { taskId: "t1", lastMessageId: "m9", lastCreatedAt: 1234, lastLogId: "L7" };
+    const b = {
+      taskId: "t1",
+      lastMessageId: "m9",
+      lastCreatedAt: 1234,
+      lastLogId: "L7",
+      taskTitle: "Aufgabe",
+      projectTitle: "Projekt",
+      logs: [{ at: 99, hours: 1.5 }],
+    };
     await store.setBinding("s1", b);
     expect(await store.getBinding("s1")).toEqual(b);
     expect(data.has("session:s1")).toBe(true);
@@ -149,7 +157,21 @@ describe("store", () => {
   test("old binding without lastCreatedAt is read", async () => {
     const { host, data } = fakeHost();
     data.set("session:s1", { taskId: "t1", lastMessageId: "m9" });
-    expect(await createStore(host).getBinding("s1")).toEqual({ taskId: "t1", lastMessageId: "m9", lastCreatedAt: null, lastLogId: null });
+    expect(await createStore(host).getBinding("s1")).toEqual({
+      taskId: "t1",
+      lastMessageId: "m9",
+      lastCreatedAt: null,
+      lastLogId: null,
+      taskTitle: null,
+      projectTitle: null,
+      logs: null,
+    });
+  });
+
+  test("malformed log entries are dropped", async () => {
+    const { host, data } = fakeHost();
+    data.set("session:s1", { taskId: "t1", lastMessageId: null, logs: [{ at: 1, hours: 2 }, { at: "x", hours: 1 }, null] });
+    expect((await createStore(host).getBinding("s1"))!.logs).toEqual([{ at: 1, hours: 2 }]);
   });
 
   test("malformed binding → null", async () => {

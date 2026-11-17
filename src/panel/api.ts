@@ -36,7 +36,8 @@ export class GatewayError extends Error {
   }
 }
 
-export type SpProject = { id: string; title: string };
+/** `folder`: the SP folder path (" / " between levels); null or missing without folder. */
+export type SpProject = { id: string; title: string; folder?: string | null };
 
 function parseBody(body: unknown): unknown {
   if (typeof body !== "string") return body;

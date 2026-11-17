@@ -44,6 +44,9 @@ function fakeService(polls: { state: string; text?: string; sessionStatus: strin
 const sessionReply = (logId: string) =>
   `Hier der Eintrag:\n${JSON.stringify({ logId, title: "Aus der Session", summary: "Session-Zusammenfassung.", hours: 1.5 })}`;
 
+/** The fields a binding from before 0.3.0 lacks. */
+const LEGACY = { taskTitle: null, projectTitle: null, logs: null };
+
 type Gen = string | Error;
 
 function setup(opts: {
@@ -334,7 +337,7 @@ describe("flow: session draft", () => {
   test("flow: binding from 0.1.0 limits the draft to work after the logged message", async () => {
     const { flow, calls, item } = setup({
       service: answeringService,
-      binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: null },
+      binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: null, ...LEGACY },
     });
     await flow.start(item);
     const prompt = promptOf(calls.service[0]!);
@@ -347,7 +350,7 @@ describe("flow: session draft", () => {
   test("flow: binding from 0.1.0 with a lost message warns to check the hours", async () => {
     const { flow, calls, item } = setup({
       service: answeringService,
-      binding: { taskId: "t1", lastMessageId: "gone", lastCreatedAt: null, lastLogId: null },
+      binding: { taskId: "t1", lastMessageId: "gone", lastCreatedAt: null, lastLogId: null, ...LEGACY },
     });
     await flow.start(item);
     const prompt = promptOf(calls.service[0]!);
@@ -373,7 +376,7 @@ describe("flow: session draft", () => {
     flow.setTarget("new");
     await flow.save();
     expect(calls.create).toHaveLength(1);
-    expect(calls.setBinding.at(-1)!.b).toEqual({ taskId: "new1", lastMessageId: "m4", lastCreatedAt: 4, lastLogId: "log-1" });
+    expect(calls.setBinding.at(-1)!.b).toMatchObject({ taskId: "new1", lastMessageId: "m4", lastCreatedAt: 4, lastLogId: "log-1" });
 
     // log 2: after log-1, appended to the bound task
     await flow.start({ ...item, messages: more(6) });
@@ -382,7 +385,7 @@ describe("flow: session draft", () => {
     expect(flow.state.target).toBe("new1");
     await flow.save();
     expect(calls.append.map((a) => a.taskId)).toEqual(["new1"]);
-    expect(calls.setBinding.at(-1)!.b).toEqual({ taskId: "new1", lastMessageId: "m6", lastCreatedAt: 6, lastLogId: "log-2" });
+    expect(calls.setBinding.at(-1)!.b).toMatchObject({ taskId: "new1", lastMessageId: "m6", lastCreatedAt: 6, lastLogId: "log-2" });
 
     // cancelled: drafted (log-3) but never saved
     await flow.start({ ...item, messages: more(8) });
@@ -398,7 +401,7 @@ describe("flow: session draft", () => {
     expect(p3).not.toContain("log-3");
     await flow.save();
     expect(calls.append.map((a) => a.taskId)).toEqual(["new1", "new1"]);
-    expect(calls.setBinding.at(-1)!.b).toEqual({ taskId: "new1", lastMessageId: "m10", lastCreatedAt: 10, lastLogId: "log-4" });
+    expect(calls.setBinding.at(-1)!.b).toMatchObject({ taskId: "new1", lastMessageId: "m10", lastCreatedAt: 10, lastLogId: "log-4" });
   });
 });
 
@@ -431,7 +434,7 @@ describe("flow", () => {
   });
 
   test("flow: bound session skips match", async () => {
-    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: null } });
+    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: null, ...LEGACY } });
     await flow.start(item);
     expect(calls.generate).toHaveLength(1);
     expect(flow.state.target).toBe("t1");
@@ -441,7 +444,7 @@ describe("flow", () => {
   });
 
   test("flow: missing lastMessageId falls back to createdAt", async () => {
-    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "gone", lastCreatedAt: 2, lastLogId: null } });
+    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "gone", lastCreatedAt: 2, lastLogId: null, ...LEGACY } });
     await flow.start(item);
     const prompt = calls.generate[0]!.prompt;
     expect(prompt).toContain("NEUE-ARBEIT");
@@ -451,7 +454,7 @@ describe("flow", () => {
   });
 
   test("flow: lost log point estimates all and warns", async () => {
-    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "gone", lastCreatedAt: null, lastLogId: null } });
+    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "gone", lastCreatedAt: null, lastLogId: null, ...LEGACY } });
     await flow.start(item);
     const prompt = calls.generate[0]!.prompt;
     expect(prompt).toContain("ALTE-ARBEIT");
@@ -494,7 +497,7 @@ describe("flow", () => {
 
   test("flow: stale binding", async () => {
     const { flow, calls, item } = setup({
-      binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: null },
+      binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: null, ...LEGACY },
       tasks: [{ id: "t2", title: "Doku", notesExcerpt: "" }],
     });
     await flow.start(item);
@@ -542,7 +545,7 @@ describe("flow", () => {
     expect(calls.create[0]!.notes).toBe(
       "### 2026-11-17 · Login gefixt · ≈ 2,5 h\nToken-Refresh repariert.\n\n<sub>OpenChamber: Session A</sub>",
     );
-    expect(calls.setBinding).toEqual([{ sessionId: "s1", b: { taskId: "new1", lastMessageId: "m4", lastCreatedAt: 4, lastLogId: null } }]);
+    expect(calls.setBinding).toMatchObject([{ sessionId: "s1", b: { taskId: "new1", lastMessageId: "m4", lastCreatedAt: 4, lastLogId: null } }]);
     expect(calls.toast).toEqual([{ kind: "success", message: "In Super Productivity geloggt" }]);
     expect(calls.close).toBe(1);
     expect(flow.state.phase).toBe("done");
@@ -557,7 +560,7 @@ describe("flow", () => {
     expect(calls.append).toHaveLength(1);
     expect(calls.append[0]!.taskId).toBe("t2");
     expect(calls.append[0]!.text).toStartWith("### 2026-11-17 · Anders · ≈ 1 h\n");
-    expect(calls.setBinding[0]!.b).toEqual({ taskId: "t2", lastMessageId: "m4", lastCreatedAt: 4, lastLogId: null });
+    expect(calls.setBinding[0]!.b).toMatchObject({ taskId: "t2", lastMessageId: "m4", lastCreatedAt: 4, lastLogId: null });
   });
 
   test("flow: append task-gone", async () => {
@@ -596,5 +599,55 @@ describe("flow", () => {
     expect(flow.state.message).toBeTruthy();
     expect(flow.state.draft.title).toBe("Login gefixt");
     expect(calls.setBinding).toHaveLength(0);
+  });
+});
+
+describe("flow: binding details", () => {
+  const AT = new Date(2026, 10, 17, 12).getTime();
+
+  test("save of a new task records titles and the first log", async () => {
+    const { flow, calls, item } = setup();
+    await flow.start(item);
+    await flow.save();
+    expect(calls.setBinding[0]!.b).toEqual({
+      taskId: "new1",
+      lastMessageId: "m4",
+      lastCreatedAt: 4,
+      lastLogId: null,
+      taskTitle: "Login gefixt",
+      projectTitle: "Projekt 1",
+      logs: [{ at: AT, hours: 2.5 }],
+    });
+  });
+
+  test("save to an existing task appends to the logs of the binding", async () => {
+    const { flow, calls, item } = setup({
+      binding: {
+        taskId: "t1",
+        lastMessageId: "m2",
+        lastCreatedAt: 2,
+        lastLogId: null,
+        taskTitle: "Login-Bug",
+        projectTitle: "Projekt 1",
+        logs: [{ at: 1000, hours: 1 }],
+      },
+    });
+    await flow.start(item);
+    flow.edit({ hours: 0.75 });
+    await flow.save();
+    expect(calls.setBinding[0]!.b).toMatchObject({
+      taskId: "t1",
+      taskTitle: "Login-Bug",
+      projectTitle: "Projekt 1",
+      logs: [{ at: 1000, hours: 1 }, { at: AT, hours: 0.75 }],
+    });
+  });
+
+  test("a binding from before 0.3.0 starts its log list with this save", async () => {
+    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: null, ...LEGACY } });
+    await flow.start(item);
+    flow.setTarget("t2");
+    await flow.save();
+    expect(calls.setBinding[0]!.b).toMatchObject({ taskId: "t2", taskTitle: "Doku", projectTitle: "Projekt 1", logs: [{ at: AT, hours: 2.5 }] });
   });
 });

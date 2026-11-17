@@ -22,6 +22,7 @@
     "icon": "time-line",
     "contributes": {
       "panel": { "entry": "dist/panel/index.html", "mobile": true },
+      "statusSection": { "entry": "dist/status/index.html", "title": "SP Log", "height": 120 },
       "attach": "dialog",
       "capabilities": ["model"],
       "service": { "entry": "dist/service/main.js", "runtime": "host" },

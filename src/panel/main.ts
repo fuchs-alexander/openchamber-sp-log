@@ -2,6 +2,7 @@ import { connectHost, isGuestSessionItem, type GuestItem } from "@openchamber/sd
 import { applyHostReady } from "@openchamber/sdk/ui";
 import { createApi } from "./api.ts";
 import { createFlow, type FlowState } from "./flow.ts";
+import { groupProjects } from "./projects.ts";
 import { createStore } from "./store.ts";
 
 const host = connectHost();
@@ -41,6 +42,28 @@ function setOptions(select: HTMLSelectElement, options: { value: string; label: 
   if (select.value !== value) select.value = value;
 }
 
+/** The project select: projects without folder first, then one <optgroup> per SP folder. */
+function setProjectOptions(select: HTMLSelectElement, s: FlowState): void {
+  const { ungrouped, groups } = groupProjects(s.projects);
+  const placeholder = s.phase === "pick-project";
+  const key = JSON.stringify({ placeholder, ungrouped, groups });
+  if (select.dataset.key !== key) {
+    const option = (p: { id: string; title: string }) => new Option(p.title, p.id);
+    const children: HTMLElement[] = placeholder ? [new Option("Projekt wählen …", "")] : [];
+    children.push(...ungrouped.map(option));
+    for (const g of groups) {
+      const group = document.createElement("optgroup");
+      group.label = g.folder;
+      group.append(...g.projects.map(option));
+      children.push(group);
+    }
+    select.replaceChildren(...children);
+    select.dataset.key = key;
+  }
+  const value = s.projectId ?? "";
+  if (select.value !== value) select.value = value;
+}
+
 /** Writes a value unless the user is typing in that control. */
 function setValue(input: HTMLInputElement | HTMLTextAreaElement, value: string): void {
   if (document.activeElement !== input && input.value !== value) input.value = value;
@@ -54,10 +77,8 @@ function render(s: FlowState): void {
   el.message.hidden = !s.message;
 
   const editing = s.phase === "ready" || s.phase === "saving";
-  const projectOptions = s.projects.map((p) => ({ value: p.id, label: p.title }));
-  if (s.phase === "pick-project") projectOptions.unshift({ value: "", label: "Projekt wählen …" });
   el.projectField.hidden = !(s.phase === "pick-project" || editing);
-  setOptions(el.project, projectOptions, s.projectId ?? "");
+  setProjectOptions(el.project, s);
   el.project.disabled = s.phase === "saving";
 
   el.editor.hidden = !editing;

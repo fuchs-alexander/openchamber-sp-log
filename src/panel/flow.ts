@@ -314,7 +314,8 @@ export function createFlow(deps: {
     const run = runId;
     const current = item;
     set({ phase: "saving", message: null });
-    const block = formatNoteBlock({ date: now(), title, hours, summary: draft.summary.trim(), sessionTitle: current.sessionTitle });
+    const date = now();
+    const block = formatNoteBlock({ date, title, hours, summary: draft.summary.trim(), sessionTitle: current.sessionTitle });
 
     let taskId: string;
     try {
@@ -336,7 +337,11 @@ export function createFlow(deps: {
     const last = current.messages[current.messages.length - 1];
     const lastMessageId = last?.id ?? binding?.lastMessageId ?? null;
     const lastCreatedAt = last?.createdAt ?? binding?.lastCreatedAt ?? null;
-    binding = { taskId, lastMessageId, lastCreatedAt, lastLogId: draftLogId };
+    const taskTitle = target === "new" ? title : (state.tasks.find((t) => t.id === target)?.title ?? title);
+    const projectTitle = state.projects.find((p) => p.id === projectId)?.title ?? null;
+    // Bindings from before 0.3.0 have no log list; it starts with this save.
+    const logs = [...(binding?.logs ?? []), { at: date.getTime(), hours }];
+    binding = { taskId, lastMessageId, lastCreatedAt, lastLogId: draftLogId, taskTitle, projectTitle, logs };
     const bound = await store.setBinding(current.sessionId, binding).then(
       () => true,
       () => false,
