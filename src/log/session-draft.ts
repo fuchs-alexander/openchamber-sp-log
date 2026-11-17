@@ -3,6 +3,14 @@ import { draftFromJson, parseHoursText, SESSION_WORK_RULES, type Draft } from ".
 /** How much of a logged message the prompt quotes to mark where the last log ended. */
 export const SINCE_HINT_MAX = 200;
 
+/** Read-only git access, so the estimate sees the real change size (incl. subagents' work). */
+export const GIT_RULES = [
+  "Du darfst ausschließlich lesende Git-Befehle im Projektverzeichnis ausführen, um den Umfang einzuschätzen: git status, git diff --stat, git diff --shortstat, git log --stat / --oneline (auch mit --since/--author), git show --stat. Keine anderen Tools, keine schreibenden oder netzwerkbezogenen Git-Befehle (kein commit, checkout, switch, reset, stash, pull, fetch, push, merge, rebase).",
+  "Betrachte die Commits und nicht committeten Änderungen, die im genannten Zeitraum in dieser Session entstanden sind, auch durch ihre Subagenten. Commits, die von anderen stammen und nur hereingeholt wurden (nicht in dieser Session erstellt), zählen nicht.",
+  "Nutze die Größe der Änderungen (berührte Dateien, geänderte Zeilen) zusammen mit dem Gesprächsverlauf als Grundlage für die Stunden. Richtwerte nach Umfang: minimal (1 Datei, wenige Zeilen) 0.5–1h, klein (1–3 Dateien) 1–3h, mittel (4–8 Dateien) 4–8h, umfangreich (8–15 Dateien) 8–16h, groß (15+ Dateien) 16–32h; generierte Dateien (dist/, Lockfiles, Bundles) nicht mitzählen; Tests und Doku zählen als Aufwand.",
+  "Schreibe keine Dateilisten oder Commit-Hashes in Titel oder Zusammenfassung. Ist das Projektverzeichnis kein Git-Repository, schätze allein aus dem Gesprächsverlauf.",
+].join("\n");
+
 function scope(sinceLogId: string | null, sinceMessageHint: string | null): string {
   if (sinceLogId) return `Berücksichtige nur Arbeit nach der Anfrage [SP-Log-Anfrage ${sinceLogId}] in dieser Session.`;
   const hint = sinceMessageHint?.replace(/\s+/g, " ").trim().slice(0, SINCE_HINT_MAX);
@@ -19,10 +27,12 @@ export function buildSessionDraftPrompt(logId: string, sinceLogId: string | null
   return [
     `[SP-Log-Anfrage ${logId}]`,
     `Erstelle einen Arbeitslog-Eintrag für die Arbeit in dieser Session. ${scope(sinceLogId, sinceMessageHint)}`,
-    "Verwende keine Tools.",
+    "",
+    GIT_RULES,
     "",
     SESSION_WORK_RULES,
     "",
+    "Werkzeugaufrufe davor sind erlaubt, aber deine Antwort enthält am Ende nur den Block.",
     "Antworte ausschließlich mit genau diesem Block, ohne weiteren Text, und ersetze die Platzhalter <Titel>, <Zusammenfassung> und <Stunden>:",
     "```openui-lang",
     "root = Stack([d])",

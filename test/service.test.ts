@@ -79,6 +79,22 @@ describe("service drafts", () => {
     }
   });
 
+  test("service: intermediate replies while the session runs git tools stay pending", async () => {
+    const { drafts, state } = setup({ status: "idle", reply: "alt" });
+    await drafts.start({ sessionId: "S1", logId: "L1", prompt: "p" });
+    state.status = "busy";
+    for (const step of ["Ich prüfe den Git-Verlauf.", "", "Jetzt git diff --stat."]) {
+      state.reply = step;
+      for (let i = 0; i < 4; i++) {
+        expect(await drafts.poll({ sessionId: "S1", logId: "L1" })).toEqual({ state: "pending", sessionStatus: "busy" });
+      }
+    }
+    const block = '```openui-lang\nroot = Stack([d])\nd = SpLogDraft("L1", "T", "S", "2")\n```';
+    state.reply = block;
+    state.status = "idle";
+    expect(await drafts.poll({ sessionId: "S1", logId: "L1" })).toEqual({ state: "done", text: block, sessionStatus: "idle" });
+  });
+
   test("service: fails after idle without reply", async () => {
     const { drafts, state } = setup({ status: "idle", reply: "irgendwas" });
     await drafts.start({ sessionId: "S1", logId: "L1", prompt: "p" });

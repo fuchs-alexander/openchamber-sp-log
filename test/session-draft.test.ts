@@ -8,8 +8,38 @@ describe("buildSessionDraftPrompt", () => {
   test("starts with the request marker and asks for the SpLogDraft block with the logId", () => {
     expect(prompt.startsWith("[SP-Log-Anfrage L1]")).toBe(true);
     expect(prompt).toContain("```openui-lang\nroot = Stack([d])\nd = SpLogDraft(\"L1\", \"<Titel>\", \"<Zusammenfassung>\", \"<Stunden>\")\n```");
-    expect(prompt).toContain("Verwende keine Tools.");
+    expect(prompt).not.toContain("Verwende keine Tools");
     expect(prompt).toContain(SESSION_WORK_RULES);
+  });
+
+  test("allows only read-only git commands in the project directory", () => {
+    expect(prompt).toContain("ausschließlich lesende Git-Befehle im Projektverzeichnis");
+    for (const cmd of ["git status", "git diff --stat", "git diff --shortstat", "git log --stat / --oneline (auch mit --since/--author)", "git show --stat"]) {
+      expect(prompt).toContain(cmd);
+    }
+    expect(prompt).toContain("Keine anderen Tools, keine schreibenden oder netzwerkbezogenen Git-Befehle (kein commit, checkout, switch, reset, stash, pull, fetch, push, merge, rebase).");
+  });
+
+  test("scopes git to changes made in this session, not commits pulled from others", () => {
+    expect(prompt).toMatch(/Commits und nicht committeten Änderungen/);
+    expect(prompt).toContain("Subagenten");
+    expect(prompt).toMatch(/von anderen .*zählen nicht/);
+  });
+
+  test("gives the size guide and the generated-files rule", () => {
+    expect(prompt).toContain("Richtwerte nach Umfang: minimal (1 Datei, wenige Zeilen) 0.5–1h, klein (1–3 Dateien) 1–3h, mittel (4–8 Dateien) 4–8h, umfangreich (8–15 Dateien) 8–16h, groß (15+ Dateien) 16–32h");
+    expect(prompt).toContain("generierte Dateien (dist/, Lockfiles, Bundles) nicht mitzählen");
+    expect(prompt).toContain("Tests und Doku zählen als Aufwand");
+  });
+
+  test("keeps file lists and hashes out of the card and falls back without git", () => {
+    expect(prompt).toMatch(/keine Dateilisten oder Commit-Hashes/);
+    expect(prompt).toMatch(/kein Git-Repository/);
+  });
+
+  test("tool calls may come first, but the answer is only the block", () => {
+    expect(prompt).toMatch(/Werkzeugaufrufe davor sind erlaubt/);
+    expect(prompt).toContain("Antworte ausschließlich mit genau diesem Block");
   });
 
   test("explains quoting: double quotes, escaped quotes and newlines, decimal dot", () => {
