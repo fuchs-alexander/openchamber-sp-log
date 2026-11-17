@@ -42,7 +42,8 @@ konstanter Zeit). JSON rein und raus, Body höchstens 64 KiB.
 
 | Route | Zweck |
 |---|---|
-| `GET /projects` | `[{id, title}]` aller nicht archivierten SP-Projekte |
+| `GET /me` | `{name}`, für die Verbindungsanzeige der Integration |
+| `GET /projects` | `[{id, title}]` aller nicht archivierten, sichtbaren SP-Projekte |
 | `GET /projects/:id/tasks` | offene Aufgaben `[{id, title, notesExcerpt}]` (Auszug ≤ 300 Zeichen) |
 | `POST /tasks` | `{projectId, title, notes}` → `{id}`; legt eine offene Aufgabe an |
 | `POST /tasks/:id/append` | `{text}` → `{id}`; liest die Notiz und schreibt `alt + "\n\n" + text` zurück |
@@ -64,7 +65,7 @@ eine Session-Aktion `log-session` („Nach Super Productivity loggen“) mit
 `integration` wie oben.
 
 **Speicher** (`scope: instance`, also für Desktop und Handy derselbe):
-- `project:<OpenChamber-Projekt>` → SP-Projekt-ID
+- `project:<Projektverzeichnis der Session>` → SP-Projekt-ID
 - `session:<Session-ID>` → `{taskId, lastMessageId}`
 
 **Dialog-Ablauf** (für etwa 360 px und Touch ausgelegt):
