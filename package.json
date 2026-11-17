@@ -7,11 +7,35 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "build": "bun scripts/build.ts",
-    "check": "bun run typecheck && bun test"
+    "check": "bun run typecheck && bun run build && bun test"
   },
   "devDependencies": {
     "@openchamber/sdk": "2.7.2",
     "@types/bun": "^1.4.4",
     "typescript": "^7.0.2"
+  },
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": { "openchamber": ">=2.7.0" },
+    "id": "sp-log",
+    "name": "SP Log",
+    "icon": "time-line",
+    "contributes": {
+      "panel": { "entry": "dist/panel/index.html", "mobile": true },
+      "attach": "dialog",
+      "capabilities": ["model"],
+      "actions": [
+        { "id": "log-session", "label": "Nach Super Productivity loggen", "where": "session", "payload": ["messages"], "mode": "open" }
+      ],
+      "integration": {
+        "name": "Super Productivity",
+        "description": "Log-Gateway auf dem Dell",
+        "token": {
+          "apiOrigin": "https://dev-sp.nomobo.de",
+          "account": { "path": "/me", "name": "name" },
+          "scheme": "bearer"
+        }
+      }
+    }
   }
 }
