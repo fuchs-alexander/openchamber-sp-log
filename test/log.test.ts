@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildDraftRequest, messagesSince, parseDraft, type Msg } from "../src/log/draft.ts";
+import { buildDraftRequest, DRAFT_SYSTEM_PROMPT, messagesSince, parseDraft, WORK_RULES, type Msg } from "../src/log/draft.ts";
 import { buildMatchRequest, parseMatch } from "../src/log/match.ts";
 import { formatNoteBlock } from "../src/log/note.ts";
 
@@ -168,5 +168,20 @@ describe("formatNoteBlock", () => {
     expect(formatNoteBlock({ ...base, date: new Date(2026, 0, 5), hours: 1 })).toStartWith(
       "### 2026-01-05 ·",
     );
+  });
+});
+
+describe("WORK_RULES", () => {
+  test("names routine steps and pulled-in changes as non-work", () => {
+    for (const word of ["Pull", "Fast-Forward", "Merge", "Push", "Commit", "Neustarts", "per Pull hereingekommene Änderungen anderer"]) {
+      expect(WORK_RULES).toContain(word);
+    }
+    expect(WORK_RULES).toContain("Aufwand eines erfahrenen Entwicklers ohne KI");
+    expect(WORK_RULES).toContain("minimal 0.5–1h, klein 1–3h, mittel 4–8h, umfangreich 8–16h, groß 16–32h");
+  });
+
+  test("DRAFT_SYSTEM_PROMPT embeds WORK_RULES", () => {
+    expect(DRAFT_SYSTEM_PROMPT).toContain(WORK_RULES);
+    expect(buildDraftRequest([], "T").system).toContain(WORK_RULES);
   });
 });
