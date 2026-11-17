@@ -163,3 +163,60 @@ eine Session-Aktion `log-session` („Nach Super Productivity loggen“) mit
 
 Obsidian, Git, gemessene Zeiterfassung, Rückspiegelung von Änderungen,
 Verwaltungs-UI außer der Projektwahl, mehrere SP-Instanzen.
+
+## Nachtrag 2026-11-17: Entwurf durch die geloggte Session selbst
+
+Rückmeldung aus dem ersten Praxistest: Das Small Model hat Routine-Schritte
+(Pulls, Fast-Forwards, Neustarts) und die per Pull hereingekommene Arbeit
+anderer protokolliert. Was dabei herauskam:
+
+> `main` wurde mehrfach per Fast-Forward aktualisiert und der Dienst
+> `autohaus-cars-v2.service` jeweils neu gestartet … Mit den Pulls kamen neue
+> Fahrzeugpakete (u. a. Kessler Sturmvogel …) … Außerdem wurde ein
+> AGENTS.md-Eintrag übernommen.
+
+**Entscheidung des Nutzers:**
+- Den Entwurf schreibt der **Agent der geloggten Session mit ihrem eigenen
+  Modell**.
+- Anfrage und JSON-Antwort stehen sichtbar im Session-Verlauf. Damit ist der Log
+  auch in den Session-Daten enthalten.
+
+**Umsetzung:**
+- Die Erweiterung bekommt einen **Dienst** (`service`, `runtime: host`, auf dem
+  Server der jeweiligen Instanz) mit `sessionControl: { content: true }`.
+- Dienst-API, alle Aufrufe aus dem Dialog per `host.serviceRequest`; jeder
+  einzelne Aufruf muss unter 20 s bleiben:
+  - `POST /draft {sessionId, prompt, logId}`: merkt sich vorher die letzte
+    Antwort der Session (`lastReply`) und schickt dann `sessions.send`. Die
+    Antwort ist `{started:true}`.
+  - `GET /draft?sessionId&logId`: liefert
+    `{state:'pending'|'done'|'failed', text?, sessionStatus}`.
+    - `done`: `lastReply` enthält die `logId`.
+    - `failed`: Die Session ist `idle`, aber nach 3 Abfragen ohne Treffer gibt
+      es keine Antwort mit `logId`.
+- Der Dialog fragt alle 2 s nach, höchstens 10 Minuten lang. Ist die Session
+  beschäftigt, zeigt er „Wartet, bis die Session frei ist …“.
+- **Rückfall:** Nutzt die Session-Anfrage nicht, weil Dienst oder Berechtigung
+  fehlen, ein Fehler auftritt oder die Zeit abläuft, entwirft das Small Model
+  mit demselben geschärften Regelwerk. Der Dialog weist darauf hin.
+- **Session-Prompt** (Deutsch), Kernregeln:
+  - Nur Arbeit, die in dieser Session selbst geleistet wurde: umgesetzte
+    Features, Fixes, Analysen, Entscheidungen, Konfiguration.
+  - Nicht als Arbeit zählen:
+    - Routine-Git (Pull, Fast-Forward, Merge, Rebase, Push, Commit,
+      Branch-Wechsel)
+    - Dienst-Neustarts und Status-Checks
+    - Änderungen anderer, die per Pull hereinkamen
+    - Commit-Hashes und Dateilisten
+  - Besteht die Session nur aus Routine: kurzer Titel (z. B. „Deployment
+    aktualisiert“), ein Satz, kleiner Aufwand.
+  - Nur Arbeit seit der letzten SP-Log-Anfrage in dieser Session.
+  - Die Summary beschreibt das Ergebnis aus Sicht der Arbeit, nicht als
+    Befehlsprotokoll.
+  - Keine Tools verwenden.
+  - Antwort ausschließlich als JSON:
+    `{"logId": "<id>", "title", "summary", "hours"}`.
+- Die Bindung `lastMessageId` bleibt für den Rückfall erhalten.
+- Der Abgleich mit SP-Aufgaben bleibt beim Small Model.
+- Die Version steigt auf `0.2.0`, damit installierte Instanzen das Update
+  angeboten bekommen.
