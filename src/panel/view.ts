@@ -160,7 +160,7 @@ export function renderFlow(root: HTMLElement, flow: Flow, opts: FlowViewOptions)
     project.disabled = s.phase === "saving";
 
     editor.hidden = !editing;
-    setOptions(target, [{ value: "new", label: "Neue Aufgabe" }, ...s.tasks.map((t) => ({ value: t.id, label: t.title }))], s.target);
+    setOptions(target, [{ value: "new", label: "Neue Aufgabe" }, ...s.tasks.map((t) => ({ value: t.id, label: t.isDone ? `${t.title} (erledigt)` : t.title }))], s.target);
     setValue(title, s.draft.title);
     setValue(summary, s.draft.summary);
     setValue(hours, s.draft.hours === null ? "" : String(s.draft.hours));

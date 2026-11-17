@@ -127,24 +127,34 @@ describe("gateway", () => {
     expect(sp.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /tasks?projectId=A"]);
   });
 
-  test("gateway: create", async () => {
+  test("gateway: create, then complete the task", async () => {
     const { sp, handle } = gw({
       "POST /tasks": () => json({ ok: true, data: { id: "NEW1", title: "t" } }),
+      "PATCH /tasks/NEW1": () => json({ ok: true, data: { id: "NEW1" } }),
     });
     const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "body", extra: "no" }));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ id: "NEW1" });
-    expect(sp.calls).toHaveLength(1);
-    expect(sp.calls[0]!.method).toBe("POST");
-    expect(sp.calls[0]!.path).toBe("/tasks");
+    expect(await res.json()).toEqual({ id: "NEW1", completed: true });
+    expect(sp.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["POST /tasks", "PATCH /tasks/NEW1"]);
     expect(sp.calls[0]!.body).toEqual({ title: "Log", notes: "body", projectId: "A" });
+    expect(sp.calls[1]!.body).toEqual({ isDone: true });
 
     expect((await handle(req("POST", "/tasks", { projectId: "A", notes: "x" }))).status).toBe(400);
     expect((await handle(req("POST", "/tasks", { projectId: "A", title: "", notes: "x" }))).status).toBe(400);
     expect((await handle(req("POST", "/tasks", { projectId: "A", title: "t".repeat(201), notes: "x" }))).status).toBe(400);
     expect((await handle(req("POST", "/tasks", { projectId: "../x", title: "t", notes: "x" }))).status).toBe(400);
     expect((await handle(req("POST", "/tasks", "not json"))).status).toBe(400);
-    expect(sp.calls).toHaveLength(1);
+    expect(sp.calls).toHaveLength(2);
+  });
+
+  test("gateway: failed completion → 200 with completed false", async () => {
+    const { handle } = gw({
+      "POST /tasks": () => json({ ok: true, data: { id: "NEW1", title: "t" } }),
+      "PATCH /tasks/NEW1": () => json({ ok: false }, 500),
+    });
+    const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "body" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id: "NEW1", completed: false });
   });
 
   test("gateway: append", async () => {
@@ -156,19 +166,31 @@ describe("gateway", () => {
       });
       const res = await handle(req("POST", "/tasks/T/append", { text: "neu" }));
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ id: "T" });
-      expect(sp.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /tasks/T", "PATCH /tasks/T"]);
+      expect(await res.json()).toEqual({ id: "T", completed: true });
+      expect(sp.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /tasks/T", "PATCH /tasks/T", "PATCH /tasks/T"]);
       expect(sp.calls[1]!.body).toEqual({ notes: expected });
+      expect(sp.calls[2]!.body).toEqual({ isDone: true });
     };
     await run("alt", "alt\n\nneu");
     await run("", "neu");
     await run(undefined, "neu");
   });
 
-  test("gateway: append to done/missing task", async () => {
+  test("gateway: append to a done task appends and completes it again", async () => {
+    const { sp, handle } = gw({
+      "GET /tasks/T": () => json({ ok: true, data: { id: "T", title: "t", notes: "alt", isDone: true } }),
+      "PATCH /tasks/T": () => json({ ok: true, data: { id: "T" } }),
+    });
+    const res = await handle(req("POST", "/tasks/T/append", { text: "neu" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id: "T", completed: true });
+    expect(sp.calls.map((c) => c.body)).toEqual([undefined, { notes: "alt\n\nneu" }, { isDone: true }]);
+  });
+
+  test("gateway: append to archived/missing task", async () => {
     for (const getRoute of [
       () => json({ ok: false, error: "not found" }, 404),
-      () => json({ ok: true, data: { id: "T", title: "t", notes: "alt", isDone: true } }),
+      () => json({ ok: true, data: { id: "T", title: "t", notes: "alt", isDone: true, isArchived: true } }),
     ]) {
       const { sp, handle } = gw({
         "GET /tasks/T": getRoute,
@@ -181,12 +203,37 @@ describe("gateway", () => {
     }
   });
 
+  test("gateway: GET /tasks/:id gives id, title and isDone", async () => {
+    const { sp, handle } = gw({
+      "GET /tasks/T": () => json({ ok: true, data: { id: "T", title: "Login", notes: "geheim", isDone: true, timeSpent: 5 } }),
+      "GET /tasks/O": () => json({ ok: true, data: { id: "O", title: "Offen", isDone: false } }),
+    });
+    const done = await handle(req("GET", "/tasks/T"));
+    expect(done.status).toBe(200);
+    expect(await done.json()).toEqual({ id: "T", title: "Login", isDone: true });
+    expect(await (await handle(req("GET", "/tasks/O"))).json()).toEqual({ id: "O", title: "Offen", isDone: false });
+    expect(sp.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /tasks/T", "GET /tasks/O"]);
+  });
+
+  test("gateway: GET /tasks/:id missing or archived → 404 task-gone", async () => {
+    const { handle } = gw({
+      "GET /tasks/A": () => json({ ok: true, data: { id: "A", title: "a", isDone: true, isArchived: true } }),
+    });
+    for (const id of ["A", "MISSING"]) {
+      const res = await handle(req("GET", `/tasks/${id}`));
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "task-gone" });
+    }
+    expect((await handle(req("GET", "/tasks/T", undefined, null))).status).toBe(401);
+  });
+
   test("gateway: invalid id", async () => {
     const { sp, handle } = gw();
     const bad = ["a.b", "a%2Fb", "x".repeat(65), "%20"];
     for (const id of bad) {
       expect((await handle(req("GET", `/projects/${id}/tasks`))).status).toBe(400);
       expect((await handle(req("POST", `/tasks/${id}/append`, { text: "x" }))).status).toBe(400);
+      expect((await handle(req("GET", `/tasks/${id}`))).status).toBe(400);
     }
     expect(sp.calls).toHaveLength(0);
   });
@@ -287,14 +334,17 @@ describe("gateway", () => {
       const { sp, handle } = gwt(spModel());
       const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Login", notes: "block", hours: 2.5, logTitle: "Login gefixt" }));
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ id: "N1", subtaskId: "N2", timeBooked: true });
-      expect(seq(sp)).toEqual(["POST /tasks", "POST /tasks", "POST /tasks/N2/time"]);
+      expect(await res.json()).toEqual({ id: "N1", subtaskId: "N2", timeBooked: true, completed: true });
+      expect(seq(sp)).toEqual(["POST /tasks", "POST /tasks", "POST /tasks/N2/time", "PATCH /tasks/N1"]);
       expect(sp.calls[0]!.body).toEqual({ title: "Login", notes: "block", projectId: "A" });
       expect(sp.calls[1]!.body).toEqual({ parentId: "N1", title: "17.11. · Login gefixt", notes: "block", isDone: true });
       expect(sp.calls[2]!.body).toEqual({ date: "2026-11-17", duration: 9_000_000 });
       expect(sp.calls[2]!.auth).toBe(`Bearer ${SP_TOKEN}`);
       expect(sp.total("N1")).toBe(2.5 * H);
       expect(sp.total("N2")).toBe(2.5 * H);
+      expect(sp.calls[3]!.body).toEqual({ isDone: true });
+      expect(sp.get("N1")!.isDone).toBe(true);
+      expect(sp.get("N2")!.isDone).toBe(true);
     });
 
     test("append with hours: patch, then subtask with the appended block, time on it", async () => {
@@ -303,12 +353,32 @@ describe("gateway", () => {
       const { handle } = gwt(sp);
       const res = await handle(req("POST", "/tasks/T/append", { text: "neu", hours: 0.75, logTitle: "Fix" }));
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ id: "T", subtaskId: "N1", timeBooked: true });
-      expect(seq(sp)).toEqual(["GET /tasks/T", "PATCH /tasks/T", "POST /tasks", "POST /tasks/N1/time"]);
+      expect(await res.json()).toEqual({ id: "T", subtaskId: "N1", timeBooked: true, completed: true });
+      expect(seq(sp)).toEqual(["GET /tasks/T", "PATCH /tasks/T", "POST /tasks", "POST /tasks/N1/time", "PATCH /tasks/T"]);
       expect(sp.calls[1]!.body).toEqual({ notes: "alt\n\nneu" });
       expect(sp.calls[2]!.body).toEqual({ parentId: "T", title: "17.11. · Fix", notes: "neu", isDone: true });
       expect(sp.calls[3]!.body).toEqual({ date: "2026-11-17", duration: 2_700_000 });
       expect(sp.total("T")).toBe(0.75 * H);
+      expect(sp.get("T")!.isDone).toBe(true);
+    });
+
+    test("sessions logged 2–3 times: later logs append to the done task and complete it again", async () => {
+      const { sp, handle } = gwt(spModel());
+      const first = await handle(req("POST", "/tasks", { projectId: "A", title: "Login", notes: "b1", hours: 1, logTitle: "Eins" }));
+      expect(await first.json()).toEqual({ id: "N1", subtaskId: "N2", timeBooked: true, completed: true });
+      expect(sp.get("N1")!.isDone).toBe(true);
+      for (const [i, title] of ["Zwei", "Drei"].entries()) {
+        const res = await handle(req("POST", "/tasks/N1/append", { text: title, hours: 0.5, logTitle: title }));
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ id: "N1", subtaskId: `N${3 + i}`, timeBooked: true, completed: true });
+        expect(sp.get("N1")!.isDone).toBe(true);
+      }
+      expect(sp.get("N1")!.notes).toBe("b1\n\nZwei\n\nDrei");
+      expect(sp.get("N1")!.subTaskIds).toEqual(["N2", "N3", "N4"]);
+      expect(sp.total("N1")).toBe(2 * H);
+      // A done task is no longer offered as an open candidate, but stays readable.
+      expect(await (await handle(req("GET", "/projects/A/tasks"))).json()).toEqual([]);
+      expect(await (await handle(req("GET", "/tasks/N1"))).json()).toEqual({ id: "N1", title: "Login", isDone: true });
     });
 
     test("more than 24h on one day across two logs → two subtasks, both booked", async () => {
@@ -353,7 +423,7 @@ describe("gateway", () => {
         const { handle } = gwt(sp);
         const res = await handle(req("POST", "/tasks/T/append", { text: "neu", hours: 10, logTitle: "Mehr" }));
         expect(res.status).toBe(200);
-        expect(await res.json()).toEqual({ id: "T", subtaskId: "N2", timeBooked: true });
+        expect(await res.json()).toEqual({ id: "T", subtaskId: "N2", timeBooked: true, completed: true });
         const legacy = sp.get("N1")!;
         expect(legacy.title).toBe("Frühere Logs");
         expect(legacy.isDone).toBe(true);
@@ -367,7 +437,7 @@ describe("gateway", () => {
 
         // A second log does not convert again.
         const again = await handle(req("POST", "/tasks/T/append", { text: "noch", hours: 1, logTitle: "Noch" }));
-        expect(await again.json()).toEqual({ id: "T", subtaskId: "N3", timeBooked: true });
+        expect(await again.json()).toEqual({ id: "T", subtaskId: "N3", timeBooked: true, completed: true });
         expect(sp.get("T")!.subTaskIds).toEqual(["N1", "N2", "N3"]);
         expect(sp.calls.filter((c) => (c.body as { title?: string } | undefined)?.title === "Frühere Logs")).toHaveLength(1);
         expect(sp.total("T")).toBe(34 * H);
@@ -380,7 +450,8 @@ describe("gateway", () => {
       const { handle } = gwt(sp);
       const res = await handle(req("POST", "/tasks/T/append", { text: "neu", hours: 1, logTitle: "x" }));
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ id: "T", timeBooked: false, timeError: "sp-convert-failed" });
+      expect(await res.json()).toEqual({ id: "T", timeBooked: false, timeError: "sp-convert-failed", completed: true });
+      expect(sp.get("T")!.isDone).toBe(true);
       expect(sp.get("T")!.notes).toBe("neu");
       expect(sp.calls.filter((c) => c.path === "/tasks")).toHaveLength(1);
     });
@@ -400,10 +471,10 @@ describe("gateway", () => {
         const { handle } = gwt(sp);
         const c = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", ...extra }));
         expect(c.status).toBe(200);
-        expect(await c.json()).toEqual({ id: "N1" });
+        expect(await c.json()).toEqual({ id: "N1", completed: true });
         const a = await handle(req("POST", "/tasks/T/append", { text: "neu", ...extra }));
         expect(a.status).toBe(200);
-        expect(await a.json()).toEqual({ id: "T" });
+        expect(await a.json()).toEqual({ id: "T", completed: true });
         expect(sp.calls.some((x) => x.path.endsWith("/time"))).toBe(false);
         expect(sp.calls.filter((x) => x.method === "POST" && x.path === "/tasks")).toHaveLength(1);
       }
@@ -427,7 +498,7 @@ describe("gateway", () => {
     test("hours 24 is allowed", async () => {
       const { sp, handle } = gwt(spModel());
       const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours: 24 }));
-      expect(await res.json()).toEqual({ id: "N1", subtaskId: "N2", timeBooked: true });
+      expect(await res.json()).toEqual({ id: "N1", subtaskId: "N2", timeBooked: true, completed: true });
       expect(sp.calls[2]!.body).toEqual({ date: "2026-11-17", duration: 86_400_000 });
     });
 
@@ -435,7 +506,7 @@ describe("gateway", () => {
       const { handle } = gwt(spModel({ failTime: true }));
       const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours: 1 }));
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ id: "N1", subtaskId: "N2", timeBooked: false, timeError: "sp-time-rejected" });
+      expect(await res.json()).toEqual({ id: "N1", subtaskId: "N2", timeBooked: false, timeError: "sp-time-rejected", completed: true });
     });
 
     test("rejected subtask → 200 with sp-subtask-rejected, no booking", async () => {
@@ -443,7 +514,7 @@ describe("gateway", () => {
       const { handle } = gwt(sp);
       const res = await handle(req("POST", "/tasks", { projectId: "A", title: "Log", notes: "", hours: 1 }));
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ id: "N1", timeBooked: false, timeError: "sp-subtask-rejected" });
+      expect(await res.json()).toEqual({ id: "N1", timeBooked: false, timeError: "sp-subtask-rejected", completed: true });
       expect(sp.calls.some((x) => x.path.endsWith("/time"))).toBe(false);
     });
 
@@ -454,7 +525,7 @@ describe("gateway", () => {
       const res = await handle(req("POST", "/tasks/T/append", { text: "neu", hours: 1 }));
       expect(res.status).toBe(200);
       const text = await res.text();
-      expect(JSON.parse(text)).toEqual({ id: "T", subtaskId: "N1", timeBooked: false, timeError: "sp-unreachable" });
+      expect(JSON.parse(text)).toEqual({ id: "T", subtaskId: "N1", timeBooked: false, timeError: "sp-unreachable", completed: true });
       expect(text).not.toContain(SP_TOKEN);
     });
 
@@ -576,6 +647,7 @@ function spModel(opts: { inherit?: boolean; failTime?: boolean; failSubtask?: bo
     if (!m[2] && method === "GET") return json({ ok: true, data: view(t) });
     if (!m[2] && method === "PATCH") {
       if (typeof body?.notes === "string") t.notes = body.notes;
+      if (typeof body?.isDone === "boolean") t.isDone = body.isDone;
       return json({ ok: true, data: view(t) });
     }
     if (m[2] && method === "POST") {

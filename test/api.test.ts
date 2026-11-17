@@ -46,7 +46,7 @@ describe("api", () => {
   test("sends string body", async () => {
     const { host, requests } = fakeHost(() => ({ status: 200, body: '{"id":"t1"}' }));
     const saved = await createApi(host).create("p1", "Titel", "Notiz", 1.5, "Log-Titel");
-    expect(saved).toEqual({ id: "t1", timeBooked: null, timeError: null });
+    expect(saved).toEqual({ id: "t1", timeBooked: null, timeError: null, completed: null });
     expect(requests).toEqual([
       {
         method: "POST",
@@ -58,7 +58,7 @@ describe("api", () => {
 
   test("append sends string body to encoded path", async () => {
     const { host, requests } = fakeHost(() => ({ status: 200, body: { id: "a/b" } }));
-    expect(await createApi(host).append("a/b", "Text", 0.5, "Fix")).toEqual({ id: "a/b", timeBooked: null, timeError: null });
+    expect(await createApi(host).append("a/b", "Text", 0.5, "Fix")).toEqual({ id: "a/b", timeBooked: null, timeError: null, completed: null });
     expect(requests[0]).toEqual({
       method: "POST",
       path: "/tasks/a%2Fb/append",
@@ -68,11 +68,11 @@ describe("api", () => {
 
   test("surfaces timeBooked and timeError", async () => {
     const booked = fakeHost(() => ({ status: 200, body: { id: "t1", timeBooked: true } }));
-    expect(await createApi(booked.host).create("p1", "T", "N", 1, "T")).toEqual({ id: "t1", timeBooked: true, timeError: null });
-    const failed = fakeHost(() => ({ status: 200, body: { id: "t1", timeBooked: false, timeError: "sp-time-rejected" } }));
-    expect(await createApi(failed.host).append("t1", "x", 1, "x")).toEqual({ id: "t1", timeBooked: false, timeError: "sp-time-rejected" });
+    expect(await createApi(booked.host).create("p1", "T", "N", 1, "T")).toEqual({ id: "t1", timeBooked: true, timeError: null, completed: null });
+    const failed = fakeHost(() => ({ status: 200, body: { id: "t1", timeBooked: false, timeError: "sp-time-rejected", completed: null } }));
+    expect(await createApi(failed.host).append("t1", "x", 1, "x")).toEqual({ id: "t1", timeBooked: false, timeError: "sp-time-rejected", completed: null });
     const odd = fakeHost(() => ({ status: 200, body: { id: "t1", timeBooked: "yes", timeError: 5 } }));
-    expect(await createApi(odd.host).append("t1", "x", 1, "x")).toEqual({ id: "t1", timeBooked: null, timeError: null });
+    expect(await createApi(odd.host).append("t1", "x", 1, "x")).toEqual({ id: "t1", timeBooked: null, timeError: null, completed: null });
   });
 
   test("parses string and object bodies", async () => {
@@ -84,6 +84,30 @@ describe("api", () => {
     const fromObject = await createApi(fakeHost(() => ({ status: 200, body: list })).host).projects();
     expect(fromString).toEqual(list);
     expect(fromObject).toEqual(list);
+  });
+
+  test("surfaces completed", async () => {
+    const done = fakeHost(() => ({ status: 200, body: { id: "t1", completed: true } }));
+    expect((await createApi(done.host).append("t1", "x", 1, "x")).completed).toBe(true);
+    const open = fakeHost(() => ({ status: 200, body: { id: "t1", completed: false } }));
+    expect((await createApi(open.host).create("p1", "T", "N", 1, "T")).completed).toBe(false);
+  });
+
+  test("task reads one task, null when gone", async () => {
+    const { host, requests } = fakeHost((req) =>
+      req.path === "/tasks/a%2Fb"
+        ? { status: 200, body: { id: "a/b", title: "Alt", isDone: true, extra: 1 } }
+        : { status: 404, body: { error: "task-gone" } },
+    );
+    const api = createApi(host);
+    expect(await api.task("a/b")).toEqual({ id: "a/b", title: "Alt", isDone: true });
+    expect(requests[0]).toEqual({ method: "GET", path: "/tasks/a%2Fb" });
+    expect(await api.task("x")).toBeNull();
+    const broken = fakeHost(() => ({ status: 502, body: { error: "sp-error" } }));
+    const err = await createApi(broken.host).task("x").catch((e: unknown) => e);
+    expect((err as GatewayError).code).toBe("sp-error");
+    const odd = fakeHost(() => ({ status: 200, body: { id: 5 } }));
+    expect(((await createApi(odd.host).task("x").catch((e: unknown) => e)) as GatewayError).code).toBe("bad-response");
   });
 
   test("task-gone", async () => {

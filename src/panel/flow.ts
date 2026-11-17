@@ -2,18 +2,20 @@ import { buildDraftRequest, messagesSince, parseDraft, type Draft, type Msg } fr
 import { buildMatchRequest, parseMatch, type MatchCandidate } from "../log/match.ts";
 import { formatNoteBlock } from "../log/note.ts";
 import { buildSessionDraftPrompt, parseSessionDraft } from "../log/session-draft.ts";
-import { GatewayError, type Api, type HostLike, type SpProject } from "./api.ts";
+import { GatewayError, type Api, type BoundTask, type HostLike, type SpProject } from "./api.ts";
 import { createDraftsClient, DraftServiceError } from "./drafts-client.ts";
 import type { Binding, PendingStore, Store } from "./store.ts";
 
 export type Phase = "disconnected" | "pick-project" | "drafting" | "ready" | "saving" | "done" | "error";
 export type Target = string; // a task id, or "new"
+/** A target choice: the project's open tasks, and the bound task even when it is done. */
+export type TaskOption = MatchCandidate & { isDone?: boolean };
 
 export type FlowState = {
   phase: Phase;
   projects: SpProject[];
   projectId: string | null;
-  tasks: MatchCandidate[];
+  tasks: TaskOption[];
   target: Target;
   draft: Draft;
   message: string | null;
@@ -38,7 +40,7 @@ const EMPTY_DRAFT: Draft = { title: "", summary: "", hours: null };
 const TEXT = {
   draftFailed: "Kein Entwurf vom Modell – bitte Titel, Zusammenfassung und Stunden selbst ausfüllen.",
   staleBinding: "Die zuletzt verknüpfte Aufgabe ist nicht mehr offen. Es wird eine neue Aufgabe angelegt.",
-  taskGone: "Die Aufgabe existiert nicht mehr oder ist erledigt. Bitte „Neue Aufgabe“ wählen oder eine andere.",
+  taskGone: "Die Aufgabe existiert nicht mehr oder ist archiviert. Bitte „Neue Aufgabe“ wählen oder eine andere.",
   needTitle: "Bitte einen Titel (höchstens 200 Zeichen) eingeben.",
   needHours: "Bitte die Stunden (0 bis 24) eingeben.",
   saveFailed: "Speichern fehlgeschlagen. Der Entwurf bleibt erhalten – bitte erneut versuchen.",
@@ -248,13 +250,25 @@ export function createFlow(deps: {
     }
   }
 
+  /**
+   * The bound task when it is not among the open tasks: on the first load it
+   * is looked up by id, since a log completes its task (null: gone). After a
+   * project change it only counts when it is open in that project.
+   */
+  async function boundTask(tasks: MatchCandidate[], initial: boolean): Promise<BoundTask | null> {
+    if (!binding || tasks.some((t) => t.id === binding!.taskId) || !initial) return null;
+    return api.task(binding.taskId);
+  }
+
   /** Loads open tasks and the draft for a project, then picks the target. */
   async function loadProject(run: number, projectId: string, initial: boolean): Promise<void> {
     set({ phase: "drafting", projectId, message: null });
-    let tasks: MatchCandidate[];
+    let tasks: TaskOption[];
     let drafted: Drafted;
+    let bound: BoundTask | null;
     try {
-      [tasks, drafted] = await Promise.all([api.tasks(projectId), ensureDraft(run)]);
+      const listed = api.tasks(projectId);
+      [tasks, drafted, bound] = await Promise.all([listed, ensureDraft(run), listed.then((open) => boundTask(open, initial))]);
     } catch (err) {
       if (run === runId) fail(err);
       return;
@@ -277,7 +291,10 @@ export function createFlow(deps: {
 
     let target: Target;
     if (binding) {
-      if (tasks.some((t) => t.id === binding!.taskId)) {
+      if (bound) {
+        tasks = [{ id: bound.id, title: bound.title, notesExcerpt: "", isDone: bound.isDone }, ...tasks];
+        target = bound.id;
+      } else if (tasks.some((t) => t.id === binding!.taskId)) {
         target = binding.taskId;
       } else {
         target = "new";
@@ -290,6 +307,7 @@ export function createFlow(deps: {
         }
       }
     } else {
+      // Only open tasks are candidates for a new session's log.
       target = await suggestTarget(state.draft, tasks);
       if (run !== runId) return;
     }

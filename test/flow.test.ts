@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { HostRequestError, type GenerateRequest, type GuestRequest, type GuestRequestResult } from "@openchamber/sdk";
 import type { Msg } from "../src/log/draft.ts";
 import type { MatchCandidate } from "../src/log/match.ts";
-import { GatewayError, type Api, type HostLike, type SaveResult, type SpProject } from "../src/panel/api.ts";
+import { GatewayError, type Api, type BoundTask, type HostLike, type SaveResult, type SpProject } from "../src/panel/api.ts";
 import type { Binding, Store } from "../src/panel/store.ts";
 import { createFlow } from "../src/panel/flow.ts";
 
@@ -57,6 +57,8 @@ function setup(opts: {
   generate?: Gen[];
   append?: (taskId: string) => string | Error | SaveResult;
   create?: () => string | Error | SaveResult;
+  /** GET /tasks/:id; default: the open tasks, anything else is gone (null). */
+  task?: (id: string) => BoundTask | null | Error;
   setBindingError?: Error;
   setProject?: () => Promise<void>;
   /** The extension's service; by default there is none (`NO_SERVICE`). */
@@ -69,6 +71,7 @@ function setup(opts: {
     create: [] as { projectId: string; title: string; notes: string; hours: number; logTitle: string }[],
     append: [] as { taskId: string; text: string; hours: number; logTitle: string }[],
     tasks: [] as string[],
+    task: [] as string[],
     generate: [] as GenerateRequest[],
     setProject: [] as { dir: string; id: string }[],
     setBinding: [] as { sessionId: string; b: Binding }[],
@@ -95,17 +98,26 @@ function setup(opts: {
       calls.tasks.push(projectId);
       return tasks;
     },
+    task: async (id) => {
+      calls.task.push(id);
+      const r = opts.task ? opts.task(id) : (() => {
+        const open = tasks.find((t) => t.id === id);
+        return open ? { id, title: open.title, isDone: false } : null;
+      })();
+      if (r instanceof Error) throw r;
+      return r;
+    },
     create: async (projectId, title, notes, hours, logTitle) => {
       calls.create.push({ projectId, title, notes, hours, logTitle });
       const r = opts.create?.() ?? "new1";
       if (r instanceof Error) throw r;
-      return typeof r === "string" ? { id: r, timeBooked: true, timeError: null } : r;
+      return typeof r === "string" ? { id: r, timeBooked: true, timeError: null, completed: true } : r;
     },
     append: async (taskId, text, hours, logTitle) => {
       calls.append.push({ taskId, text, hours, logTitle });
       const r = opts.append?.(taskId) ?? taskId;
       if (r instanceof Error) throw r;
-      return typeof r === "string" ? { id: r, timeBooked: true, timeError: null } : r;
+      return typeof r === "string" ? { id: r, timeBooked: true, timeError: null, completed: true } : r;
     },
   };
   const store: Store = {
@@ -509,6 +521,62 @@ describe("flow", () => {
     expect(flow.state.phase).toBe("ready");
   });
 
+  test("flow: a done bound task stays the target and is offered as (erledigt)", async () => {
+    const { flow, calls, item } = setup({
+      binding: { taskId: "t9", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: null, ...LEGACY },
+      task: (id) => (id === "t9" ? { id: "t9", title: "Alt", isDone: true } : null),
+    });
+    await flow.start(item);
+    expect(calls.task).toEqual(["t9"]);
+    expect(calls.clearBinding).toHaveLength(0);
+    expect(flow.state.phase).toBe("ready");
+    expect(flow.state.target).toBe("t9");
+    expect(flow.state.message).toBe(FALLBACK);
+    // only the draft: no matching for a bound session
+    expect(calls.generate).toHaveLength(1);
+    expect(flow.state.tasks.map((t) => t.id)).toEqual(["t9", "t1", "t2"]);
+    expect(flow.state.tasks[0]).toMatchObject({ id: "t9", title: "Alt", isDone: true });
+    flow.setTarget("t1");
+    flow.setTarget("t9");
+    expect(flow.state.target).toBe("t9");
+    await flow.save();
+    expect(calls.append.map((a) => a.taskId)).toEqual(["t9"]);
+    expect(calls.create).toHaveLength(0);
+    expect(calls.setBinding[0]!.b).toMatchObject({ taskId: "t9", taskTitle: "Alt" });
+  });
+
+  test("flow: an open bound task in the list needs no lookup", async () => {
+    const { flow, calls, item } = setup({ binding: { taskId: "t1", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: null, ...LEGACY } });
+    await flow.start(item);
+    expect(flow.state.target).toBe("t1");
+    expect(calls.task).toEqual([]);
+    expect(flow.state.tasks.map((t) => t.id)).toEqual(["t1", "t2"]);
+  });
+
+  test("flow: bound task gone (404) → binding cleared, new task, message", async () => {
+    const { flow, calls, item } = setup({
+      binding: { taskId: "t9", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: null, ...LEGACY },
+      task: () => null,
+    });
+    await flow.start(item);
+    expect(calls.task).toEqual(["t9"]);
+    expect(calls.clearBinding).toEqual(["s1"]);
+    expect(flow.state.target).toBe("new");
+    expect(flow.state.message).toContain("Es wird eine neue Aufgabe angelegt.");
+    expect(flow.state.tasks.map((t) => t.id)).toEqual(["t1", "t2"]);
+    expect(flow.state.phase).toBe("ready");
+  });
+
+  test("flow: bound task lookup fails → load error, binding kept", async () => {
+    const { flow, calls, item } = setup({
+      binding: { taskId: "t9", lastMessageId: "m2", lastCreatedAt: 2, lastLogId: null, ...LEGACY },
+      task: () => new GatewayError(503, "sp-unreachable"),
+    });
+    await flow.start(item);
+    expect(flow.state.phase).toBe("error");
+    expect(calls.clearBinding).toHaveLength(0);
+  });
+
   test("flow: empty task list skips match", async () => {
     const { flow, calls, item } = setup({ tasks: [] });
     await flow.start(item);
@@ -580,7 +648,7 @@ describe("flow", () => {
   });
 
   test("flow: time not booked → error toast, still binds and finishes", async () => {
-    const { flow, calls, item } = setup({ create: () => ({ id: "new1", timeBooked: false, timeError: "sp-time-rejected" }) });
+    const { flow, calls, item } = setup({ create: () => ({ id: "new1", timeBooked: false, timeError: "sp-time-rejected", completed: true }) });
     await flow.start(item);
     await flow.save();
     expect(calls.toast).toEqual([
@@ -593,7 +661,7 @@ describe("flow", () => {
   });
 
   test("flow: no time booking reported (hours 0 / old gateway) → success toast", async () => {
-    const { flow, calls, item } = setup({ create: () => ({ id: "new1", timeBooked: null, timeError: null }) });
+    const { flow, calls, item } = setup({ create: () => ({ id: "new1", timeBooked: null, timeError: null, completed: true }) });
     await flow.start(item);
     flow.edit({ hours: 0 });
     await flow.save();

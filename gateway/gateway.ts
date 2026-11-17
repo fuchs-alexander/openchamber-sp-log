@@ -187,23 +187,46 @@ export function createGateway(opts: GatewayOptions): (req: Request) => Promise<R
   // SP caps tracked time at 24h per task and day, but not across tasks. So
   // each log becomes its own done subtask carrying the log's time; the parent
   // shows the sum of its subtasks.
-  async function logAsSubtask(id: string, hours: number, logTitle: string, notes: string): Promise<Response> {
-    if (hours <= 0) return json({ id });
+  async function logAsSubtask(id: string, hours: number, logTitle: string, notes: string): Promise<Record<string, unknown>> {
+    if (hours <= 0) return { id };
     const today = now();
     const title = `${dayMonth(today)} · ${logTitle}`;
     const created = await trySp("POST", "/tasks", { parentId: id, title, notes, isDone: true });
     const subtaskId = created.ok ? asRecord(created.data).id : undefined;
     if (typeof subtaskId !== "string" || !ID_PATTERN.test(subtaskId)) {
       const timeError = !created.ok && created.error === "sp-unreachable" ? "sp-unreachable" : "sp-subtask-rejected";
-      return json({ id, timeBooked: false, timeError });
+      return { id, timeBooked: false, timeError };
     }
     const duration = Math.max(1, Math.round(hours * 3_600_000));
     const booked = await trySp("POST", `/tasks/${subtaskId}/time`, { date: localDate(today), duration });
     if (!booked.ok) {
       const timeError = booked.error === "sp-unreachable" ? "sp-unreachable" : "sp-time-rejected";
-      return json({ id, subtaskId, timeBooked: false, timeError });
+      return { id, subtaskId, timeBooked: false, timeError };
     }
-    return json({ id, subtaskId, timeBooked: true });
+    return { id, subtaskId, timeBooked: true };
+  }
+
+  // A logged task is finished: the parent is marked done last, after its log
+  // subtask and time, so SP never sees new work under a done parent. Failure
+  // is reported as completed: false; the log itself is already written.
+  async function complete(id: string, result: Record<string, unknown>): Promise<Response> {
+    const done = await trySp("PATCH", `/tasks/${id}`, { isDone: true });
+    return json({ ...result, completed: done.ok });
+  }
+
+  // The task by id, or null when SP no longer has it (missing, or archived:
+  // archived tasks are not addressable for updates).
+  async function readTask(id: string): Promise<Record<string, unknown> | null> {
+    const current = await sp("GET", `/tasks/${id}`, undefined, true);
+    if (current === null) return null;
+    const task = asRecord(current);
+    return task.isArchived === true ? null : task;
+  }
+
+  async function getTask(id: string): Promise<Response> {
+    const task = await readTask(id);
+    if (task === null) fail(404, "task-gone");
+    return json({ id, title: asString(task.title), isDone: task.isDone === true });
   }
 
   // A parent with its own tracked time but no subtasks (logged before 0.5.0)
@@ -276,7 +299,7 @@ export function createGateway(opts: GatewayOptions): (req: Request) => Promise<R
     const logTitle = checkLogTitle(body.logTitle);
     const data = asRecord(await sp("POST", "/tasks", { title, notes, projectId }));
     if (typeof data.id !== "string" || !ID_PATTERN.test(data.id)) fail(502, "sp-error");
-    return logAsSubtask(data.id, hours, logTitle, notes);
+    return complete(data.id, await logAsSubtask(data.id, hours, logTitle, notes));
   }
 
   async function appendToTask(id: string, req: Request): Promise<Response> {
@@ -285,15 +308,14 @@ export function createGateway(opts: GatewayOptions): (req: Request) => Promise<R
     if (typeof text !== "string" || text.trim() === "") fail(400, "invalid-text");
     const hours = checkHours(body.hours);
     const logTitle = checkLogTitle(body.logTitle);
-    const current = await sp("GET", `/tasks/${id}`, undefined, true);
-    if (current === null) fail(404, "task-gone");
-    const task = asRecord(current);
-    if (task.isDone === true || task.isArchived === true) fail(404, "task-gone");
+    // A done task still takes logs: sessions are often logged several times.
+    const task = await readTask(id);
+    if (task === null) fail(404, "task-gone");
     const old = asString(task.notes);
     const notes = old === "" ? text : `${old}\n\n${text}`;
     await sp("PATCH", `/tasks/${id}`, { notes });
-    if (hours > 0 && !(await convertLegacy(id, task))) return json({ id, timeBooked: false, timeError: "sp-convert-failed" });
-    return logAsSubtask(id, hours, logTitle, text);
+    if (hours > 0 && !(await convertLegacy(id, task))) return complete(id, { id, timeBooked: false, timeError: "sp-convert-failed" });
+    return complete(id, await logAsSubtask(id, hours, logTitle, text));
   }
 
   async function route(req: Request): Promise<Response> {
@@ -308,6 +330,7 @@ export function createGateway(opts: GatewayOptions): (req: Request) => Promise<R
       return listTasks(checkId(parts[1]));
     }
     if (method === "POST" && pathname === "/tasks") return createTask(req);
+    if (method === "GET" && parts.length === 2 && parts[0] === "tasks") return getTask(checkId(parts[1]));
     if (method === "POST" && parts.length === 3 && parts[0] === "tasks" && parts[2] === "append") {
       return appendToTask(checkId(parts[1]), req);
     }

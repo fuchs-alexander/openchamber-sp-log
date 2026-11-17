@@ -64,16 +64,22 @@ function idOf(data: unknown): string {
 /**
  * A written log. `timeBooked`: whether the hours were booked as tracked time
  * in SP; null when the gateway booked nothing (hours 0, or an older gateway).
+ * `completed`: whether the task was marked done after the log; null from an
+ * older gateway.
  */
-export type SaveResult = { id: string; timeBooked: boolean | null; timeError: string | null };
+export type SaveResult = { id: string; timeBooked: boolean | null; timeError: string | null; completed: boolean | null };
+
+/** A task looked up by id (open or done). */
+export type BoundTask = { id: string; title: string; isDone: boolean };
 
 function saveResultOf(data: unknown): SaveResult {
   const id = idOf(data);
-  const record = data as { timeBooked?: unknown; timeError?: unknown };
+  const record = data as { timeBooked?: unknown; timeError?: unknown; completed?: unknown };
   return {
     id,
     timeBooked: typeof record.timeBooked === "boolean" ? record.timeBooked : null,
     timeError: typeof record.timeError === "string" ? record.timeError : null,
+    completed: typeof record.completed === "boolean" ? record.completed : null,
   };
 }
 
@@ -113,6 +119,18 @@ export function createApi(host: HostLike) {
     async tasks(projectId: string): Promise<MatchCandidate[]> {
       const path = `/projects/${encodeURIComponent(projectId)}/tasks`;
       return listOf(await call({ method: "GET", path })) as MatchCandidate[];
+    },
+    /** The task by id, open or done; null when it is gone (missing or archived). */
+    async task(taskId: string): Promise<BoundTask | null> {
+      let data: unknown;
+      try {
+        data = await call({ method: "GET", path: `/tasks/${encodeURIComponent(taskId)}` });
+      } catch (err) {
+        if (err instanceof GatewayError && err.code === "task-gone") return null;
+        throw err;
+      }
+      const record = (data ?? {}) as { title?: unknown; isDone?: unknown };
+      return { id: idOf(data), title: typeof record.title === "string" ? record.title : "", isDone: record.isDone === true };
     },
     /** `logTitle`: the draft title; the gateway names the log's SP subtask after it. */
     async create(projectId: string, title: string, notes: string, hours: number, logTitle: string): Promise<SaveResult> {

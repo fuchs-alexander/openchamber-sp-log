@@ -221,11 +221,21 @@ function world() {
   const replies = new Map<string, string>();
   let sessionStatus = "busy";
   let polls = 0;
+  /** SP tasks by id; a log completes its task, so none of them is open. */
+  const spTasks = new Map<string, { id: string; title: string; isDone: boolean }>();
+  const appends: string[] = [];
   const api: Api = {
     projects: async () => [{ id: "p1", title: "Projekt 1" }],
-    tasks: async () => [],
-    create: async () => ({ id: "new1", timeBooked: true, timeError: null }),
-    append: async (taskId) => ({ id: taskId, timeBooked: true, timeError: null }),
+    tasks: async () => [...spTasks.values()].filter((t) => !t.isDone).map((t) => ({ id: t.id, title: t.title, notesExcerpt: "" })),
+    task: async (id) => spTasks.get(id) ?? null,
+    create: async (_projectId, title) => {
+      spTasks.set("new1", { id: "new1", title, isDone: true });
+      return { id: "new1", timeBooked: true, timeError: null, completed: true };
+    },
+    append: async (taskId) => {
+      appends.push(taskId);
+      return { id: taskId, timeBooked: true, timeError: null, completed: true };
+    },
   };
   const host: HostLike = {
     request: async () => ({ status: 200, body: "{}" }) as never,
@@ -288,6 +298,7 @@ function world() {
       sessionStatus = s;
     },
     polls: () => polls,
+    appends,
   };
 }
 
@@ -407,6 +418,36 @@ describe("status controller: logging while the session works", () => {
     for (let i = 0; i < 20; i++) await tick();
     const v = second.ctrl.view;
     expect(v.mode === "summary" && v.button).toBe("Nachloggen");
+  });
+
+  test("Nachloggen appends to the bound task although the first log completed it", async () => {
+    const w = world();
+    const first = w.frame();
+    first.ctrl.setDirectory("/repo");
+    first.ctrl.setSession({ id: "s1", title: "Session A" });
+    await tick();
+    first.ctrl.startLogging();
+    await until(() => first.flow.state.phase === "pick-project", "pick-project");
+    void first.flow.chooseProject("p1");
+    await until(() => w.posts.length === 1, "request");
+    w.reply(w.posts[0]!, reply(w.posts[0]!));
+    await until(() => first.flow.state.phase === "ready", "ready");
+    await first.flow.save();
+    expect(first.flow.state.phase).toBe("done");
+
+    const second = w.frame();
+    second.ctrl.setDirectory("/repo");
+    second.ctrl.setSession({ id: "s1", title: "Session A" });
+    await until(() => second.ctrl.view.mode === "summary" && (second.ctrl.view as { button: string | null }).button === "Nachloggen", "Nachloggen");
+    second.ctrl.startLogging();
+    await until(() => w.posts.length === 2, "second request");
+    w.reply(w.posts[1]!, reply(w.posts[1]!));
+    await until(() => second.flow.state.phase === "ready", "second ready");
+    expect(second.flow.state.target).toBe("new1");
+    expect(second.flow.state.message).toBeNull();
+    await second.flow.save();
+    expect(w.appends).toEqual(["new1"]);
+    expect(second.flow.state.phase).toBe("done");
   });
 
   test("the dialog keeps no request, and its save ends the one the Work Status waits for", async () => {
