@@ -13,7 +13,7 @@ describe("manifest", () => {
     expect(b.args).toEqual(["logId", "title", "summary", "hours"]);
     expect(b.entry).toBe("dist/block/index.html");
     expect((b.description as string).length).toBeLessThanOrEqual(120);
-    expect(pkg.version).toBe("0.8.0");
+    expect(pkg.version).toBe("0.8.1");
   });
 });
 

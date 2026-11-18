@@ -66,6 +66,8 @@ function setup(opts: {
   service?: (req: GuestRequest) => GuestRequestResult | Error;
   now?: () => Date;
   ids?: string[];
+  /** Leaves `newId` unset, so the flow makes its own log ids. */
+  useDefaultIds?: boolean;
   closeOnDone?: () => boolean;
   /** `saved:<logId>` markers already in storage. */
   saved?: Record<string, SavedLog>;
@@ -182,7 +184,7 @@ function setup(opts: {
     store,
     host,
     now: opts.now ?? (() => new Date(2026, 10, 17, 12)),
-    newId: () => ids.shift() ?? "log-x",
+    newId: opts.useDefaultIds ? undefined : () => ids.shift() ?? "log-x",
     sleep: () => new Promise((r) => setTimeout(r, 0)),
     closeOnDone: opts.closeOnDone,
     pending: opts.pending,
@@ -744,6 +746,42 @@ describe("flow", () => {
     const { flow, item } = setup({ projects: new GatewayError(0, "disconnected") });
     await flow.start(item);
     expect(flow.state.phase).toBe("disconnected");
+  });
+
+  test("flow: gateway error → Super Productivity unreachable", async () => {
+    const { flow, item } = setup({ projects: new GatewayError(503, "sp-unreachable") });
+    await flow.start(item);
+    expect(flow.state.phase).toBe("error");
+    expect(flow.state.message).toBe("Super Productivity ist gerade nicht erreichbar.");
+  });
+
+  test("flow: a bug is not reported as SP unreachable, and is logged", async () => {
+    const bug = new TypeError("crypto.randomUUID is not a function");
+    const original = console.error;
+    const logged: unknown[][] = [];
+    console.error = (...args: unknown[]) => void logged.push(args);
+    try {
+      const { flow, item } = setup({ projects: bug });
+      await flow.start(item);
+      expect(flow.state.phase).toBe("error");
+      expect(flow.state.message).toBe("Unerwarteter Fehler im SP Log – Details in der Browser-Konsole.");
+      expect(logged.some((args) => args.includes(bug))).toBe(true);
+    } finally {
+      console.error = original;
+    }
+  });
+
+  test("flow: default log ids work without crypto.randomUUID (plain http)", async () => {
+    const real = globalThis.crypto;
+    // An insecure context's crypto: getRandomValues only.
+    globalThis.crypto = { getRandomValues: real.getRandomValues.bind(real) } as Crypto;
+    try {
+      const { flow, item } = setup({ service: answeringService, useDefaultIds: true });
+      await flow.start(item);
+      expect(flow.state.phase).toBe("ready");
+    } finally {
+      globalThis.crypto = real;
+    }
   });
 
   test("flow: save error keeps draft", async () => {

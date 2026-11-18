@@ -4,6 +4,7 @@ import { formatNoteBlock } from "../log/note.ts";
 import { buildSessionDraftPrompt, parseSessionDraft } from "../log/session-draft.ts";
 import { GatewayError, type Api, type BoundTask, type HostLike, type SpProject } from "./api.ts";
 import { createDraftsClient, DraftServiceError } from "./drafts-client.ts";
+import { newLogId } from "./id.ts";
 import type { Binding, PendingStore, Store } from "./store.ts";
 
 export type Phase = "disconnected" | "pick-project" | "drafting" | "ready" | "saving" | "done" | "error";
@@ -54,6 +55,7 @@ const TEXT = {
   needHours: "Bitte die Stunden (0 bis 100) eingeben.",
   saveFailed: "Speichern fehlgeschlagen. Der Entwurf bleibt erhalten – bitte erneut versuchen.",
   loadFailed: "Super Productivity ist gerade nicht erreichbar.",
+  unexpected: "Unerwarteter Fehler im SP Log – Details in der Browser-Konsole.",
   logged: "In Super Productivity geloggt",
   logPointLost:
     "Hinweis: Letzter Log-Stand nicht gefunden – Schätzung umfasst möglicherweise bereits geloggte Arbeit. Bitte Stunden prüfen.",
@@ -118,7 +120,7 @@ export function createFlow(deps: {
   rememberPending?: boolean;
 }) {
   const { api, store, host, now } = deps;
-  const newId = deps.newId ?? (() => crypto.randomUUID());
+  const newId = deps.newId ?? (() => newLogId());
   const sleep = deps.sleep ?? sleepMs;
   const closeOnDone = deps.closeOnDone ?? (() => true);
   const pending = deps.pending ?? null;
@@ -146,7 +148,12 @@ export function createFlow(deps: {
 
   function fail(err: unknown): void {
     if (isDisconnected(err)) set({ phase: "disconnected", message: null });
-    else set({ phase: "error", message: TEXT.loadFailed });
+    else if (err instanceof GatewayError) set({ phase: "error", message: TEXT.loadFailed });
+    else {
+      // Not Super Productivity: a bug in the frame. Keep it visible for debugging.
+      console.error("SP Log:", err);
+      set({ phase: "error", message: TEXT.unexpected });
+    }
   }
 
   /**
