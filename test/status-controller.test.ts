@@ -225,6 +225,8 @@ function world() {
   /** SP tasks by id; a log completes its task, so none of them is open. */
   const spTasks = new Map<string, { id: string; title: string; isDone: boolean }>();
   const appends: string[] = [];
+  /** Session ids the flows told the service about (POST /logged). */
+  const logged: string[] = [];
   const api: Api = {
     projects: async () => [{ id: "p1", title: "Projekt 1" }],
     tasks: async () => [...spTasks.values()].filter((t) => !t.isDone).map((t) => ({ id: t.id, title: t.title, notesExcerpt: "" })),
@@ -241,7 +243,10 @@ function world() {
   const host: HostLike = {
     request: async () => ({ status: 200, body: "{}" }) as never,
     serviceRequest: async (req: GuestRequest): Promise<GuestRequestResult> => {
-      if (req.path === "/logged") return { status: 200, body: "{}" };
+      if (req.path === "/logged") {
+        logged.push(JSON.parse(req.body!).sessionId);
+        return { status: 200, body: "{}" };
+      }
       if (req.method === "POST") {
         posts.push(JSON.parse(req.body!).logId);
         return { status: 200, body: JSON.stringify({ started: true }) };
@@ -290,8 +295,22 @@ function world() {
     });
     return { flow, ctrl };
   }
+  /** The SpLogDraft card's flow (src/block/main.ts) on the same storage and service. */
+  function card() {
+    return createFlow({
+      api,
+      store: createStore(host),
+      host,
+      pending: createPendingStore(host),
+      now: () => new Date(2026, 10, 17, 15),
+      sleep: () => new Promise((r) => setTimeout(r, 0)),
+      closeOnDone: () => false,
+    });
+  }
   return {
     frame,
+    card,
+    logged,
     posts,
     storage,
     reply: (logId: string, text: string) => replies.set(logId, text),
@@ -518,5 +537,59 @@ describe("status controller: log saved through the chat card", () => {
     ctrl.startLogging();
     emit("done", "Bereits über die Karte gespeichert.");
     expect(view()).toEqual({ mode: "logged", note: "Bereits über die Karte gespeichert." });
+  });
+});
+
+describe("status controller: the card saves the log the Work Status is showing", () => {
+  test("after the service's logged event the Work Status leaves its form and shows the new binding", async () => {
+    const w = world();
+    const status = w.frame();
+    status.ctrl.setDirectory("/repo");
+    status.ctrl.setSession({ id: "s1", title: "Session A" });
+    await tick();
+    status.ctrl.startLogging();
+    await until(() => status.flow.state.phase === "pick-project", "pick-project");
+    void status.flow.chooseProject("p1");
+    await until(() => w.posts.length === 1, "request");
+    const logId = w.posts[0]!;
+    w.reply(logId, reply(logId));
+    await until(() => status.flow.state.phase === "ready", "ready");
+
+    // The session's reply is also the SpLogDraft card; the user saves there.
+    const card = w.card();
+    void card.startWithDraft({
+      sessionId: "s1",
+      sessionTitle: "Session A",
+      directory: "/repo",
+      logId,
+      draft: { title: "Login gefixt", summary: "Token-Refresh repariert.", hours: 6 },
+    });
+    await until(() => card.state.phase === "ready", "card ready");
+    await card.save();
+    expect(card.state.phase).toBe("done");
+    expect(w.logged).toEqual(["s1"]);
+    expect(w.storage.get(`saved:${logId}`)).toBeTruthy();
+
+    // The service emits `logged`; the frame calls refresh().
+    await status.ctrl.refresh();
+    for (let i = 0; i < 20; i++) await tick();
+    expect(status.ctrl.view).toEqual({ mode: "logged", note: "Bereits über die Karte gespeichert." });
+  });
+
+  test("also while the Work Status still waits for the draft", async () => {
+    const w = world();
+    const status = w.frame();
+    status.ctrl.setDirectory("/repo");
+    status.ctrl.setSession({ id: "s1", title: "Session A" });
+    await tick();
+    status.ctrl.startLogging();
+    await until(() => status.flow.state.phase === "pick-project", "pick-project");
+    void status.flow.chooseProject("p1");
+    await until(() => w.posts.length === 1 && w.polls() > 0, "polling");
+    const logId = w.posts[0]!;
+    w.storage.set(`saved:${logId}`, { taskTitle: "Login gefixt", hours: 6, at: 1 });
+    await status.ctrl.refresh();
+    expect(status.ctrl.view).toEqual({ mode: "logged", note: "Bereits über die Karte gespeichert." });
+    expect(w.storage.has("pending:s1")).toBe(false);
   });
 });

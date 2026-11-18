@@ -136,6 +136,8 @@ export function createFlow(deps: {
   let draftApplied = false;
   /** The session-draft request whose draft is in the dialog; null for a Small Model draft. */
   let draftLogId: string | null = null;
+  /** The session-draft request this run waits for or drafted from; null before one is known. */
+  let runLogId: string | null = null;
 
   function set(patch: Partial<FlowState>): void {
     state = { ...state, ...patch };
@@ -156,6 +158,7 @@ export function createFlow(deps: {
     const sessionId = current.sessionId;
     const resume = current.resume ?? null;
     const logId = resume?.logId ?? newId();
+    if (run === runId) runLogId = logId;
     const startedAt = resume?.startedAt ?? now().getTime();
     const deadline = startedAt + DRAFT_WAIT_MS;
     const forget = async (): Promise<void> => {
@@ -349,6 +352,7 @@ export function createFlow(deps: {
     set({});
 
     const logId = preset?.logId ?? next.resume?.logId ?? null;
+    runLogId = logId;
     if (await alreadySaved(run, logId)) return;
     if (run !== runId) return;
 
@@ -393,6 +397,15 @@ export function createFlow(deps: {
     await store.setProject(directory, id).catch(() => {});
     if (run !== runId) return;
     await loadProject(run, id, initial);
+  }
+
+  /**
+   * Ends the run when its log was saved meanwhile in another frame (the chat
+   * card, the dialog): phase `done` with the „already saved“ message.
+   */
+  async function settleIfSaved(): Promise<boolean> {
+    if (state.phase === "done" || state.phase === "saving") return false;
+    return alreadySaved(runId, runLogId);
   }
 
   /** Stops the current run: pending session-draft polls end and late results are dropped. */
@@ -501,6 +514,7 @@ export function createFlow(deps: {
     },
     start,
     startWithDraft,
+    settleIfSaved,
     chooseProject,
     cancel,
     setTarget,

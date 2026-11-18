@@ -23,7 +23,7 @@ export type StatusView =
 type Session = { id: string; title: string };
 
 export function createStatusController(deps: {
-  flow: Pick<Flow, "state" | "subscribe" | "start" | "cancel">;
+  flow: Pick<Flow, "state" | "subscribe" | "start" | "cancel"> & Partial<Pick<Flow, "settleIfSaved">>;
   store: Pick<Store, "getBinding" | "getSaved">;
   /** Open session-draft requests; a new frame continues the session's one. */
   pending?: Pick<PendingStore, "get" | "clear">;
@@ -57,6 +57,9 @@ export function createStatusController(deps: {
 
   /** Reads the binding again; the summary is shown only when no flow runs. */
   async function refresh(): Promise<void> {
+    // Saved elsewhere (the chat card, the dialog) while the form is shown here: the flow ends
+    // with „Bereits über die Karte gespeichert.“ and the summary follows.
+    if (view.mode === "flow" && flow.settleIfSaved && (await flow.settleIfSaved().catch(() => false))) return;
     const run = ++generation;
     const id = session?.id ?? null;
     boundDirectory = null;
