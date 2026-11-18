@@ -72,6 +72,50 @@ export type SaveResult = { id: string; timeBooked: boolean | null; timeError: st
 /** A task looked up by id (open or done). */
 export type BoundTask = { id: string; title: string; isDone: boolean };
 
+/** A subtask of the panel's task view; `timeSpentOnDay`: ms per `YYYY-MM-DD`. */
+export type SubtaskDetails = { id: string; title: string; isDone: boolean; timeSpentMs: number; timeSpentOnDay: Record<string, number> };
+
+/** The bound task as the panel shows it, live from SP (`GET /tasks/:id/details`). */
+export type TaskDetails = {
+  id: string;
+  title: string;
+  isDone: boolean;
+  projectId: string | null;
+  projectTitle: string | null;
+  timeSpentMs: number;
+  notes: string;
+  subtasks: SubtaskDetails[];
+};
+
+const str = (v: unknown): string => (typeof v === "string" ? v : "");
+const ms = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
+
+function days(v: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!v || typeof v !== "object" || Array.isArray(v)) return out;
+  for (const [day, value] of Object.entries(v)) if (/^\d{4}-\d{2}-\d{2}$/.test(day) && ms(value) > 0) out[day] = ms(value);
+  return out;
+}
+
+/** The gateway's answer, checked field by field; null without a task id. */
+export function parseTaskDetails(data: unknown): TaskDetails | null {
+  if (!data || typeof data !== "object" || typeof (data as { id?: unknown }).id !== "string") return null;
+  const r = data as Record<string, unknown>;
+  const subtasks = (Array.isArray(r.subtasks) ? r.subtasks : [])
+    .filter((s): s is Record<string, unknown> => !!s && typeof s === "object" && typeof (s as { id?: unknown }).id === "string")
+    .map((s) => ({ id: s.id as string, title: str(s.title), isDone: s.isDone === true, timeSpentMs: ms(s.timeSpentMs), timeSpentOnDay: days(s.timeSpentOnDay) }));
+  return {
+    id: r.id as string,
+    title: str(r.title),
+    isDone: r.isDone === true,
+    projectId: typeof r.projectId === "string" ? r.projectId : null,
+    projectTitle: typeof r.projectTitle === "string" ? r.projectTitle : null,
+    timeSpentMs: ms(r.timeSpentMs),
+    notes: str(r.notes),
+    subtasks,
+  };
+}
+
 function saveResultOf(data: unknown): SaveResult {
   const id = idOf(data);
   const record = data as { timeBooked?: unknown; timeError?: unknown; completed?: unknown };
@@ -131,6 +175,19 @@ export function createApi(host: HostLike) {
       }
       const record = (data ?? {}) as { title?: unknown; isDone?: unknown };
       return { id: idOf(data), title: typeof record.title === "string" ? record.title : "", isDone: record.isDone === true };
+    },
+    /** The task with its notes and subtasks, for the panel; null when it is gone. */
+    async details(taskId: string): Promise<TaskDetails | null> {
+      let data: unknown;
+      try {
+        data = await call({ method: "GET", path: `/tasks/${encodeURIComponent(taskId)}/details` });
+      } catch (err) {
+        if (err instanceof GatewayError && err.code === "task-gone") return null;
+        throw err;
+      }
+      const details = parseTaskDetails(data);
+      if (!details) throw new GatewayError(200, "bad-response");
+      return details;
     },
     /** `logTitle`: the draft title; the gateway names the log's SP subtask after it. */
     async create(projectId: string, title: string, notes: string, hours: number, logTitle: string): Promise<SaveResult> {

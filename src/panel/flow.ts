@@ -103,7 +103,7 @@ function initialState(): FlowState {
 }
 
 export function createFlow(deps: {
-  api: Api;
+  api: Omit<Api, "details">;
   store: Store;
   host: HostLike;
   now: () => Date;

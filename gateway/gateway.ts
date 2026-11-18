@@ -250,6 +250,54 @@ export function createGateway(opts: GatewayOptions): (req: Request) => Promise<R
     return json({ id, title: asString(task.title), isDone: task.isDone === true });
   }
 
+  // Tracked time of a task: SP's timeSpent, else the sum of its days.
+  function spentMs(task: Record<string, unknown>, days: Map<string, number>): number {
+    const total = task.timeSpent;
+    if (typeof total === "number" && Number.isFinite(total) && total >= 0) return Math.round(total);
+    return sumOf(days);
+  }
+
+  // Read-only view of a task for the panel: its project's title, its notes and
+  // its subtasks (one GET each, in parallel, in SP's order; missing or archived
+  // ones are skipped). The project list is optional: failures give null.
+  async function taskDetails(id: string): Promise<Response> {
+    const task = await readTask(id);
+    if (task === null) fail(404, "task-gone");
+    const projectId = typeof task.projectId === "string" ? task.projectId : null;
+    const subIds = (Array.isArray(task.subTaskIds) ? task.subTaskIds : []).filter(
+      (s): s is string => typeof s === "string" && ID_PATTERN.test(s),
+    );
+    const [projects, subs] = await Promise.all([
+      projectId ? trySp("GET", "/projects") : Promise.resolve<SpResult>({ ok: false, error: "sp-rejected" }),
+      Promise.all(subIds.map((sub) => readTask(sub).catch(() => null))),
+    ]);
+    const project = projects.ok && Array.isArray(projects.data) ? projects.data.map(asRecord).find((p) => p.id === projectId) : undefined;
+    const days = timeByDay(task.timeSpentOnDay);
+    const subtasks = subs
+      .map((sub, i) => {
+        if (sub === null) return null;
+        const subDays = timeByDay(sub.timeSpentOnDay);
+        return {
+          id: subIds[i]!,
+          title: asString(sub.title),
+          isDone: sub.isDone === true,
+          timeSpentMs: spentMs(sub, subDays),
+          timeSpentOnDay: Object.fromEntries(subDays),
+        };
+      })
+      .filter((sub) => sub !== null);
+    return json({
+      id,
+      title: asString(task.title),
+      isDone: task.isDone === true,
+      projectId,
+      projectTitle: project ? asString(project.title) : null,
+      timeSpentMs: spentMs(task, days),
+      notes: asString(task.notes),
+      subtasks,
+    });
+  }
+
   // A parent with its own tracked time but no subtasks (logged before 0.5.0)
   // first moves that time onto a done subtask "Frühere Logs"; otherwise the
   // next log subtask would take it over (SP hands a parent's time to its first
@@ -352,6 +400,9 @@ export function createGateway(opts: GatewayOptions): (req: Request) => Promise<R
     }
     if (method === "POST" && pathname === "/tasks") return createTask(req);
     if (method === "GET" && parts.length === 2 && parts[0] === "tasks") return getTask(checkId(parts[1]));
+    if (method === "GET" && parts.length === 3 && parts[0] === "tasks" && parts[2] === "details") {
+      return taskDetails(checkId(parts[1]));
+    }
     if (method === "POST" && parts.length === 3 && parts[0] === "tasks" && parts[2] === "append") {
       return appendToTask(checkId(parts[1]), req);
     }

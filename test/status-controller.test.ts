@@ -227,7 +227,7 @@ function world() {
   const appends: string[] = [];
   /** Session ids the flows told the service about (POST /logged). */
   const logged: string[] = [];
-  const api: Api = {
+  const api: Omit<Api, "details"> = {
     projects: async () => [{ id: "p1", title: "Projekt 1" }],
     tasks: async () => [...spTasks.values()].filter((t) => !t.isDone).map((t) => ({ id: t.id, title: t.title, notesExcerpt: "" })),
     task: async (id) => spTasks.get(id) ?? null,

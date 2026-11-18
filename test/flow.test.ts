@@ -96,7 +96,7 @@ function setup(opts: {
   if (opts.project !== null) projects.set("/repo", opts.project ?? "p1");
   let binding: Binding | null = opts.binding ?? null;
 
-  const api: Api = {
+  const api: Omit<Api, "details"> = {
     projects: async () => {
       if (opts.projects instanceof Error) throw opts.projects;
       return opts.projects ?? [{ id: "p1", title: "Projekt 1" }];

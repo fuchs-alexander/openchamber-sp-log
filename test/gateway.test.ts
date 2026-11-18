@@ -774,3 +774,72 @@ function spModel(
     },
   };
 }
+
+describe("gateway: GET /tasks/:id/details", () => {
+  const ok = (data: unknown) => () => json({ ok: true, data });
+  const parent = {
+    id: "T",
+    title: "Login-Bug",
+    notes: "### 17.11.\n**Fix**",
+    isDone: true,
+    projectId: "P1",
+    timeSpent: 9_000_000,
+    timeSpentOnDay: { "2026-11-17": 9_000_000 },
+    subTaskIds: ["S1", "S2", "S3"],
+  };
+
+  test("task, project title, notes and its subtasks in order; a missing subtask is skipped", async () => {
+    const { sp, handle } = gw({
+      "GET /tasks/T": ok(parent),
+      "GET /projects": ok([
+        { id: "P0", title: "Andere" },
+        { id: "P1", title: "Kunde A" },
+      ]),
+      "GET /tasks/S1": ok({ id: "S1", title: "17.11. · Login", isDone: true, timeSpent: 3_600_000, timeSpentOnDay: { "2026-11-17": 3_600_000, bad: 5 } }),
+      "GET /tasks/S3": ok({ id: "S3", title: "18.11. · Mehr", isDone: false, timeSpentOnDay: { "2026-11-18": 1_800_000 } }),
+    });
+    const res = await handle(req("GET", "/tasks/T/details"));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      id: "T",
+      title: "Login-Bug",
+      isDone: true,
+      projectId: "P1",
+      projectTitle: "Kunde A",
+      timeSpentMs: 9_000_000,
+      notes: "### 17.11.\n**Fix**",
+      subtasks: [
+        { id: "S1", title: "17.11. · Login", isDone: true, timeSpentMs: 3_600_000, timeSpentOnDay: { "2026-11-17": 3_600_000 } },
+        { id: "S3", title: "18.11. · Mehr", isDone: false, timeSpentMs: 1_800_000, timeSpentOnDay: { "2026-11-18": 1_800_000 } },
+      ],
+    });
+    expect(sp.calls.every((c) => c.method === "GET" && c.auth === `Bearer ${SP_TOKEN}`)).toBe(true);
+  });
+
+  test("time falls back to the sum of timeSpentOnDay; unknown project → null title; no subtasks", async () => {
+    const { handle } = gw({
+      "GET /tasks/T": ok({ id: "T", title: "X", isDone: false, projectId: "P9", timeSpentOnDay: { "2026-11-17": 60_000, "2026-11-18": 60_000 } }),
+      "GET /projects": ok([]),
+    });
+    const body = (await (await handle(req("GET", "/tasks/T/details"))).json()) as Record<string, unknown>;
+    expect(body).toMatchObject({ isDone: false, projectId: "P9", projectTitle: null, timeSpentMs: 120_000, notes: "", subtasks: [] });
+  });
+
+  test("a failing project list does not fail the details", async () => {
+    const { handle } = gw({ "GET /tasks/T": ok({ ...parent, subTaskIds: [] }), "GET /projects": () => json({}, 500) });
+    const res = await handle(req("GET", "/tasks/T/details"));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as Record<string, unknown>).projectTitle).toBeNull();
+  });
+
+  test("missing or archived → 404 task-gone; bad id → 400; needs the token", async () => {
+    const { handle } = gw({ "GET /tasks/A": ok({ id: "A", title: "a", isArchived: true }) });
+    for (const id of ["A", "M"]) {
+      const res = await handle(req("GET", `/tasks/${id}/details`));
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "task-gone" });
+    }
+    expect((await handle(req("GET", "/tasks/a.b/details"))).status).toBe(400);
+    expect((await handle(req("GET", "/tasks/A/details", undefined, null))).status).toBe(401);
+  });
+});
